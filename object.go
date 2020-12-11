@@ -7,6 +7,17 @@ import (
 	"io"
 	"os"
 	"sync"
+
+	"golang.org/x/crypto/chacha20poly1305"
+	"golang.org/x/crypto/poly1305"
+)
+
+const (
+	// objectChunkSize is the chunk size of object.
+	objectChunkSize = 64 << 10
+
+	// objectEncryptedChunkSize is the encrypted chunk size of object.
+	objectEncryptedChunkSize = chacha20poly1305.NonceSize + objectChunkSize + poly1305.TagSize
 )
 
 // Object is the unit of the `TGStore`.

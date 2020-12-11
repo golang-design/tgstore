@@ -5,6 +5,7 @@ space backed by Telegram.
 package tgstore
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -146,6 +147,54 @@ func (tgs *TGStore) AppendObject(
 		return nil, tgs.loadError
 	}
 
+	if content == nil {
+		content = bytes.NewReader(nil)
+	}
+
+	buf := bytes.Buffer{}
+	for {
+		if _, err := io.CopyN(&buf, content, 1); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			return nil, err
+		}
+
+		object, err := tgs.appendObject(
+			ctx,
+			id,
+			key,
+			io.LimitReader(
+				io.MultiReader(&buf, content),
+				int64(tgs.MaxMessageFileBytes/
+					objectEncryptedChunkSize*
+					objectChunkSize),
+			),
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		id = object.ID
+	}
+
+	if id != "" {
+		return tgs.DownloadObject(ctx, id, key)
+	}
+
+	return tgs.appendObject(ctx, id, key, content)
+}
+
+// appendObject appends the content to the object targeted by the id.
+//
+// The lenth of the key must be 16.
+func (tgs *TGStore) appendObject(
+	ctx context.Context,
+	id string,
+	key []byte,
+	content io.Reader,
+) (*Object, error) {
 	return nil, errors.New("not implemented")
 }
 
