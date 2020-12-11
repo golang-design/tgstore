@@ -5,7 +5,6 @@ space backed by Telegram.
 package tgstore
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -53,6 +52,9 @@ type TGStore struct {
 	//
 	// The `MaxObjectChunkBytes` must be a multiple of 92 and at least
 	// 20971492.
+	//
+	// It is ok to change the `MaxObjectChunkBytes` if you want. The object
+	// chunks have already been uploaded are not affected.
 	//
 	// Default value: 20971492
 	MaxObjectChunkBytes int `mapstructure:"max_object_chunk_bytes"`
@@ -129,11 +131,6 @@ func (tgs *TGStore) UploadObject(
 	key []byte,
 	content io.Reader,
 ) (*Object, error) {
-	tgs.loadOnce.Do(tgs.load)
-	if tgs.loadError != nil {
-		return nil, tgs.loadError
-	}
-
 	return tgs.AppendObject(ctx, "", key, content)
 }
 
@@ -141,54 +138,6 @@ func (tgs *TGStore) UploadObject(
 //
 // The lenth of the key must be 16.
 func (tgs *TGStore) AppendObject(
-	ctx context.Context,
-	id string,
-	key []byte,
-	content io.Reader,
-) (*Object, error) {
-	tgs.loadOnce.Do(tgs.load)
-	if tgs.loadError != nil {
-		return nil, tgs.loadError
-	}
-
-	if content == nil {
-		content = bytes.NewReader(nil)
-	}
-
-	buf := bytes.Buffer{}
-	for {
-		if _, err := io.CopyN(&buf, content, 1); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-
-			return nil, err
-		}
-
-		object, err := tgs.appendObject(
-			ctx,
-			id,
-			key,
-			io.LimitReader(io.MultiReader(&buf, content), 2<<30),
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		id = object.ID
-	}
-
-	if id != "" {
-		return tgs.DownloadObject(ctx, id, key)
-	}
-
-	return tgs.appendObject(ctx, id, key, content)
-}
-
-// appendObject appends the content to the object targeted by the id.
-//
-// The lenth of the key must be 16.
-func (tgs *TGStore) appendObject(
 	ctx context.Context,
 	id string,
 	key []byte,

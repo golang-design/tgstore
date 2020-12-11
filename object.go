@@ -17,17 +17,58 @@ type Object struct {
 	Checksum []byte
 
 	aead         cipher.AEAD
-	chunkIDs     []string
+	chunks       []*objectChunk
+	chunkSets    []*objectChunkSet
 	hashMidstate []byte
+}
+
+// objectMetadata is the metadata of the `Object`.
+type objectMetadata struct {
+	Chunks       []*objectChunk    `json:"chunks"`
+	ChunkSets    []*objectChunkSet `json:"chunk_sets"`
+	MIMEType     string            `json:"mime_type"`
+	Size         int64             `json:"size"`
+	HashMidstate string            `json:"hash_midstate"`
+}
+
+// objectChunk is the unit of the `Object`.
+type objectChunk struct {
+	ID   string `json:"id"`
+	Size int64  `json:"size"`
+}
+
+// newReader returns a new instance of the `io.ReadCloser`.
+func (oc *objectChunk) newReader(
+	ctx context.Context,
+	aead cipher.AEAD,
+	offset int64,
+) (io.ReadCloser, error) {
+	return nil, errors.New("not implemented")
+}
+
+// objectChunkSet is the set of the `objectChunk`.
+type objectChunkSet struct {
+	ID    string `json:"id"`
+	Size  int64  `json:"size"`
+	Count int    `json:"count"`
+}
+
+// chunks returns the list of the `objectChunk` from the ocs.
+func (ocs *objectChunkSet) chunks(
+	ctx context.Context,
+	aead cipher.AEAD,
+) ([]*objectChunk, error) {
+	return nil, errors.New("not implemented")
 }
 
 // NewReader returns a new instance of the `ObjectReader`.
 func (o *Object) NewReader(ctx context.Context) (*ObjectReader, error) {
 	return &ObjectReader{
-		ctx:      ctx,
-		aead:     o.aead,
-		chunkIDs: o.chunkIDs,
-		size:     o.Size,
+		ctx:       ctx,
+		aead:      o.aead,
+		chunks:    o.chunks,
+		chunkSets: o.chunkSets,
+		size:      o.Size,
 	}, nil
 }
 
@@ -36,7 +77,8 @@ type ObjectReader struct {
 	ctx        context.Context
 	mutex      sync.Mutex
 	aead       cipher.AEAD
-	chunkIDs   []string
+	chunks     []*objectChunk
+	chunkSets  []*objectChunkSet
 	size       int64
 	offset     int64
 	closed     bool
@@ -61,7 +103,59 @@ func (or *ObjectReader) Read(b []byte) (int, error) {
 				pipeWriter.CloseWithError(err)
 			}()
 
-			return errors.New("not implemented")
+			offset := or.offset
+			readChunks := func(chunks []*objectChunk) error {
+				for _, chunk := range chunks {
+					if chunk.Size > offset {
+						cr, err := chunk.newReader(
+							or.ctx,
+							or.aead,
+							offset,
+						)
+						if err != nil {
+							return err
+						}
+
+						_, err = io.Copy(pipeWriter, cr)
+						cr.Close()
+						if err != nil {
+							return err
+						}
+
+						offset = 0
+					} else {
+						offset -= chunk.Size
+					}
+				}
+
+				return nil
+			}
+
+			if err := readChunks(or.chunks); err != nil {
+				return err
+			}
+
+			for _, chunkSet := range or.chunkSets {
+				if chunkSet.Size > offset {
+					chunks, err := chunkSet.chunks(
+						or.ctx,
+						or.aead,
+					)
+					if err != nil {
+						return err
+					}
+
+					if err := readChunks(
+						chunks,
+					); err != nil {
+						return err
+					}
+				} else {
+					offset -= chunkSet.Size
+				}
+			}
+
+			return nil
 		}()
 
 		or.readCloser = pipeReader
