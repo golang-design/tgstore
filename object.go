@@ -23,7 +23,6 @@ const (
 // Object is the unit of the `TGStore`.
 type Object struct {
 	ID       string
-	MIMEType string
 	Size     int64
 	Checksum []byte
 
@@ -36,8 +35,7 @@ type Object struct {
 // objectMetadata is the metadata of the `Object`.
 type objectMetadata struct {
 	Contents     []*objectContent    `json:"contents"`
-	ContentSets  []*objectContentSet `json:"content_sets"`
-	MIMEType     string              `json:"mime_type"`
+	ContentSets  []*objectContentSet `json:"content_sets,omitempty"`
 	Size         int64               `json:"size"`
 	HashMidstate string              `json:"hash_midstate"`
 }
@@ -146,6 +144,8 @@ func (or *ObjectReader) Read(b []byte) (int, error) {
 				return err
 			}
 
+			// This loop is rarely executed, at least the size of
+			// the current object needs to exceed 5.7 TiB first.
 			for _, contentSet := range or.contentSets {
 				if contentSet.Size > offset {
 					contents, err := contentSet.contents(

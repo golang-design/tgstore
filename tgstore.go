@@ -54,7 +54,7 @@ type TGStore struct {
 	// The `MaxMessageFileBytes` must be at least 20971520.
 	//
 	// It is ok to change the `MaxMessageFileBytes` if you want. The objects
-	// have already been uploaded are not affected.
+	// that have already been uploaded are not affected.
 	//
 	// Default value: 20971492
 	MaxMessageFileBytes int `mapstructure:"max_message_file_bytes"`
