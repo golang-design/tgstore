@@ -38,26 +38,25 @@ type TGStore struct {
 	// Default value: ""
 	BotToken string `mapstructure:"bot_token"`
 
-	// ChatID is the ID of the Telegram chat used to store the object chunks
-	// to be uploaded.
+	// ChatID is the ID of the Telegram chat used to store the objects to be
+	// uploaded.
 	//
-	// It is ok to change the `ChatID` if you want. The object chunks that
-	// have already been uploaded are not affected.
+	// It is ok to change the `ChatID` if you want. The objects that have
+	// already been uploaded are not affected.
 	//
 	// Default value: 0
 	ChatID int64 `mapstructure:"chat_id"`
 
-	// MaxObjectChunkBytes is the maximum number of bytes allowed for a
-	// object chunk to have.
+	// MaxMessageFileBytes is the maximum number of bytes allowed for a
+	// Telegram message file to have.
 	//
-	// The `MaxObjectChunkBytes` must be a multiple of 92 and at least
-	// 20971492.
+	// The `MaxMessageFileBytes` must be at least 20971520.
 	//
-	// It is ok to change the `MaxObjectChunkBytes` if you want. The object
-	// chunks have already been uploaded are not affected.
+	// It is ok to change the `MaxMessageFileBytes` if you want. The objects
+	// have already been uploaded are not affected.
 	//
 	// Default value: 20971492
-	MaxObjectChunkBytes int `mapstructure:"max_object_chunk_bytes"`
+	MaxMessageFileBytes int `mapstructure:"max_message_file_bytes"`
 
 	// MaxUploadWorkers is the maximum number of goroutines allowed for the
 	// object chunk uploading to use at the same time.
@@ -89,7 +88,7 @@ type TGStore struct {
 func New() *TGStore {
 	return &TGStore{
 		BotAPIEndpoint:      "https://api.telegram.org",
-		MaxObjectChunkBytes: 20<<20 - (20<<20)%92,
+		MaxMessageFileBytes: 20 << 20,
 		MaxUploadWorkers:    1,
 		HTTPClient:          http.DefaultClient,
 	}
@@ -111,9 +110,8 @@ func (tgs *TGStore) load() {
 		return
 	}
 
-	if tgs.MaxObjectChunkBytes%92 != 0 ||
-		tgs.MaxObjectChunkBytes < 20<<20-(20<<20)%92 {
-		tgs.loadError = errors.New("invalid max object chunk bytes")
+	if tgs.MaxMessageFileBytes < 20<<20 {
+		tgs.loadError = errors.New("invalid max message file bytes")
 		return
 	}
 

@@ -17,28 +17,28 @@ type Object struct {
 	Checksum []byte
 
 	aead         cipher.AEAD
-	chunks       []*objectChunk
-	chunkSets    []*objectChunkSet
+	contents     []*objectContent
+	contentSets  []*objectContentSet
 	hashMidstate []byte
 }
 
 // objectMetadata is the metadata of the `Object`.
 type objectMetadata struct {
-	Chunks       []*objectChunk    `json:"chunks"`
-	ChunkSets    []*objectChunkSet `json:"chunk_sets"`
-	MIMEType     string            `json:"mime_type"`
-	Size         int64             `json:"size"`
-	HashMidstate string            `json:"hash_midstate"`
+	Contents     []*objectContent    `json:"contents"`
+	ContentSets  []*objectContentSet `json:"content_sets"`
+	MIMEType     string              `json:"mime_type"`
+	Size         int64               `json:"size"`
+	HashMidstate string              `json:"hash_midstate"`
 }
 
-// objectChunk is the unit of the `Object`.
-type objectChunk struct {
+// objectContent is the unit of the `Object`.
+type objectContent struct {
 	ID   string `json:"id"`
 	Size int64  `json:"size"`
 }
 
 // newReader returns a new instance of the `io.ReadCloser`.
-func (oc *objectChunk) newReader(
+func (oc *objectContent) newReader(
 	ctx context.Context,
 	aead cipher.AEAD,
 	offset int64,
@@ -46,43 +46,43 @@ func (oc *objectChunk) newReader(
 	return nil, errors.New("not implemented")
 }
 
-// objectChunkSet is the set of the `objectChunk`.
-type objectChunkSet struct {
+// objectContentSet is the set of the `objectContent`.
+type objectContentSet struct {
 	ID    string `json:"id"`
 	Size  int64  `json:"size"`
 	Count int    `json:"count"`
 }
 
-// chunks returns the list of the `objectChunk` from the ocs.
-func (ocs *objectChunkSet) chunks(
+// contents returns the list of the `objectContent` from the ocs.
+func (ocs *objectContentSet) contents(
 	ctx context.Context,
 	aead cipher.AEAD,
-) ([]*objectChunk, error) {
+) ([]*objectContent, error) {
 	return nil, errors.New("not implemented")
 }
 
 // NewReader returns a new instance of the `ObjectReader`.
 func (o *Object) NewReader(ctx context.Context) (*ObjectReader, error) {
 	return &ObjectReader{
-		ctx:       ctx,
-		aead:      o.aead,
-		chunks:    o.chunks,
-		chunkSets: o.chunkSets,
-		size:      o.Size,
+		ctx:         ctx,
+		aead:        o.aead,
+		contents:    o.contents,
+		contentSets: o.contentSets,
+		size:        o.Size,
 	}, nil
 }
 
 // ObjectReader is the reader of the `Object`.
 type ObjectReader struct {
-	ctx        context.Context
-	mutex      sync.Mutex
-	aead       cipher.AEAD
-	chunks     []*objectChunk
-	chunkSets  []*objectChunkSet
-	size       int64
-	offset     int64
-	closed     bool
-	readCloser io.ReadCloser
+	ctx         context.Context
+	mutex       sync.Mutex
+	aead        cipher.AEAD
+	contents    []*objectContent
+	contentSets []*objectContentSet
+	size        int64
+	offset      int64
+	closed      bool
+	readCloser  io.ReadCloser
 }
 
 // Read implements the `io.Reader`.
@@ -104,10 +104,10 @@ func (or *ObjectReader) Read(b []byte) (int, error) {
 			}()
 
 			offset := or.offset
-			readChunks := func(chunks []*objectChunk) error {
-				for _, chunk := range chunks {
-					if chunk.Size > offset {
-						cr, err := chunk.newReader(
+			readContents := func(contents []*objectContent) error {
+				for _, content := range contents {
+					if content.Size > offset {
+						cr, err := content.newReader(
 							or.ctx,
 							or.aead,
 							offset,
@@ -124,20 +124,20 @@ func (or *ObjectReader) Read(b []byte) (int, error) {
 
 						offset = 0
 					} else {
-						offset -= chunk.Size
+						offset -= content.Size
 					}
 				}
 
 				return nil
 			}
 
-			if err := readChunks(or.chunks); err != nil {
+			if err := readContents(or.contents); err != nil {
 				return err
 			}
 
-			for _, chunkSet := range or.chunkSets {
-				if chunkSet.Size > offset {
-					chunks, err := chunkSet.chunks(
+			for _, contentSet := range or.contentSets {
+				if contentSet.Size > offset {
+					contents, err := contentSet.contents(
 						or.ctx,
 						or.aead,
 					)
@@ -145,13 +145,13 @@ func (or *ObjectReader) Read(b []byte) (int, error) {
 						return err
 					}
 
-					if err := readChunks(
-						chunks,
+					if err := readContents(
+						contents,
 					); err != nil {
 						return err
 					}
 				} else {
-					offset -= chunkSet.Size
+					offset -= contentSet.Size
 				}
 			}
 
