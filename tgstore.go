@@ -108,6 +108,17 @@ func (tgs *TGStore) load() {
 	); tgs.loadError != nil {
 		return
 	}
+
+	if tgs.MaxObjectChunkBytes%92 != 0 ||
+		tgs.MaxObjectChunkBytes < 20<<20-(20<<20)%92 {
+		tgs.loadError = errors.New("invalid max object chunk bytes")
+		return
+	}
+
+	if tgs.MaxUploadWorkers < 1 {
+		tgs.loadError = errors.New("invalid max upload workers")
+		return
+	}
 }
 
 // UploadObject uploades the content to the cloud.
