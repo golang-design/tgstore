@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/allegro/bigcache/v3"
 	"golang.org/x/crypto/chacha20poly1305"
 	"gopkg.in/tucnak/telebot.v2"
 )
@@ -68,8 +69,16 @@ type TGStore struct {
 	// It is ok to change the `MaxFileBytes` if you want. The objects that
 	// have already been uploaded are not affected.
 	//
-	// Default value: 20971492
+	// Default value: 20971520
 	MaxFileBytes int `mapstructure:"max_file_bytes"`
+
+	// MaxObjectMetadataCacheBytes is the maximum number of bytes allowed
+	// for object metadata cache to use.
+	//
+	// The `MaxObjectMetadataCacheBytes` must be at least 1048576 (1 MiB).
+	//
+	// Default value: 1048576
+	MaxObjectMetadataCacheBytes int `mapstructure:"max_object_metadata_cache_bytes"`
 
 	// HTTPClient is the `http.Client` used to communicate with the Telegram
 	// Bot API.
@@ -82,6 +91,7 @@ type TGStore struct {
 	bot                   *telebot.Bot
 	chat                  *telebot.Chat
 	maxObjectContentBytes int64
+	objectMetadataCache   *bigcache.BigCache
 }
 
 // New returns a new instance of the `TGStore` with default field values.
@@ -90,9 +100,10 @@ type TGStore struct {
 // and keeps everything working.
 func New() *TGStore {
 	return &TGStore{
-		BotAPIEndpoint: "https://api.telegram.org",
-		MaxFileBytes:   20 << 20,
-		HTTPClient:     http.DefaultClient,
+		BotAPIEndpoint:              "https://api.telegram.org",
+		MaxFileBytes:                20 << 20,
+		MaxObjectMetadataCacheBytes: 1 << 20,
+		HTTPClient:                  http.DefaultClient,
 	}
 }
 
@@ -129,6 +140,30 @@ func (tgs *TGStore) load() {
 	tgs.maxObjectContentBytes = int64(tgs.MaxFileBytes)
 	tgs.maxObjectContentBytes /= objectEncryptedChunkSize
 	tgs.maxObjectContentBytes *= objectChunkSize
+
+	if tgs.MaxObjectMetadataCacheBytes < 1<<20 {
+		tgs.loadError = errors.New(
+			"invalid max object metadata cache bytes",
+		)
+		return
+	}
+
+	if tgs.objectMetadataCache, tgs.loadError = bigcache.NewBigCache(
+		bigcache.Config{
+			Shards:             1024,
+			LifeWindow:         24 * time.Hour,
+			CleanWindow:        10 * time.Second,
+			MaxEntriesInWindow: 1000 * 10 * 60,
+			MaxEntrySize:       500,
+			HardMaxCacheSize:   tgs.MaxObjectMetadataCacheBytes / (1 << 20),
+		},
+	); tgs.loadError != nil {
+		tgs.loadError = fmt.Errorf(
+			"failed to create object metadata cache: %v",
+			tgs.loadError,
+		)
+		return
+	}
 }
 
 // UploadObject uploads the content to the cloud.
@@ -333,18 +368,23 @@ func (tgs *TGStore) appendObject(
 
 	if id, err = tgs.uploadTelegramFile(
 		ctx,
-		io.MultiReader(
-			bytes.NewReader(nonce),
-			bytes.NewReader(aead.Seal(
-				nil,
-				nonce,
-				metadataJSON,
-				nil,
-			)),
+		io.TeeReader(
+			io.MultiReader(
+				bytes.NewReader(nonce),
+				bytes.NewReader(aead.Seal(
+					nil,
+					nonce,
+					metadataJSON,
+					nil,
+				)),
+			),
+			&buf,
 		),
 	); err != nil {
 		return nil, err
 	}
+
+	tgs.objectMetadataCache.Set(id, buf.Bytes())
 
 	return &Object{
 		ID:           id,
@@ -380,15 +420,19 @@ func (tgs *TGStore) DownloadObject(
 		return nil, err
 	}
 
-	rc, err := tgs.downloadTelegramFile(ctx, id, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer rc.Close()
+	metadataJSON, _ := tgs.objectMetadataCache.Get(id)
+	if len(metadataJSON) == 0 {
+		rc, err := tgs.downloadTelegramFile(ctx, id, 0)
+		if err != nil {
+			return nil, err
+		}
+		defer rc.Close()
 
-	metadataJSON, err := ioutil.ReadAll(rc)
-	if err != nil {
-		return nil, err
+		if metadataJSON, err = ioutil.ReadAll(rc); err != nil {
+			return nil, err
+		}
+
+		tgs.objectMetadataCache.Set(id, metadataJSON)
 	}
 
 	nonce := metadataJSON[:chacha20poly1305.NonceSize]
