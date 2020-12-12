@@ -127,7 +127,8 @@ func (tgs *TGStore) load() {
 	}
 
 	tgs.maxObjectContentBytes = int64(tgs.MaxFileBytes)
-	tgs.maxObjectContentBytes /= objectEncryptedChunkSize * objectChunkSize
+	tgs.maxObjectContentBytes /= objectEncryptedChunkSize
+	tgs.maxObjectContentBytes *= objectChunkSize
 }
 
 // UploadObject uploads the content to the cloud.
