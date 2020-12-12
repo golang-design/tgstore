@@ -197,51 +197,6 @@ func (tgs *TGStore) Append(
 		return nil, tgs.loadError
 	}
 
-	if content == nil {
-		content = bytes.NewReader(nil)
-	}
-
-	for {
-		buf := bytes.Buffer{}
-		if _, err := io.CopyN(&buf, content, 1); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-
-			return nil, err
-		}
-
-		content = io.MultiReader(&buf, content)
-
-		object, err := tgs.append(
-			ctx,
-			id,
-			key,
-			io.LimitReader(content, tgs.objectMaxContentBytes),
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		id = object.ID
-	}
-
-	if id != "" {
-		return tgs.Download(ctx, id, key)
-	}
-
-	return tgs.append(ctx, id, key, content)
-}
-
-// append appends the content to the object targeted by the id.
-//
-// The lenth of the key must be 16.
-func (tgs *TGStore) append(
-	ctx context.Context,
-	id string,
-	key []byte,
-	content io.Reader,
-) (*Object, error) {
 	aead, err := chacha20poly1305.New(key)
 	if err != nil {
 		return nil, err
@@ -253,7 +208,11 @@ func (tgs *TGStore) append(
 		hashFunc = sha256.New()
 	)
 
-	content = io.TeeReader(content, hashFunc)
+	if content != nil {
+		content = io.TeeReader(content, hashFunc)
+	} else {
+		content = bytes.NewReader(nil)
+	}
 
 	if id != "" {
 		object, err := tgs.Download(ctx, id, key)
@@ -266,11 +225,6 @@ func (tgs *TGStore) append(
 		if len(contents) > 0 {
 			lc := contents[len(contents)-1]
 			if lc.Size < tgs.objectMinContentBytes {
-				content = io.LimitReader(
-					content,
-					tgs.objectMaxContentBytes-lc.Size,
-				)
-
 				lcr, err := lc.newReader(ctx, tgs, aead, 0)
 				if err != nil {
 					return nil, err
@@ -290,71 +244,87 @@ func (tgs *TGStore) append(
 		}
 	}
 
-	var contentSize int64
-
-	pipeReader, pipeWriter := io.Pipe()
-	go func() (err error) {
-		defer func() {
-			pipeWriter.CloseWithError(err)
-		}()
-
-		var (
-			buf   = make([]byte, objectEncryptedChunkSize)
-			nonce = make([]byte, chacha20poly1305.NonceSize)
-		)
-
-		for {
-			n, err := io.ReadFull(content, buf[:objectChunkSize])
-			if err != nil {
-				if errors.Is(err, io.EOF) {
-					break
-				} else if !errors.Is(err, io.ErrUnexpectedEOF) {
-					return err
-				}
+	for {
+		buf := bytes.Buffer{}
+		if _, err := io.CopyN(&buf, content, 1); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
 			}
 
-			if err := readNonce(nonce); err != nil {
-				return err
-			}
-
-			if _, err := pipeWriter.Write(nonce); err != nil {
-				return err
-			}
-
-			if _, err := pipeWriter.Write(aead.Seal(
-				buf[:0],
-				nonce,
-				buf[:n],
-				nil,
-			)); err != nil {
-				return err
-			}
-
-			size += int64(n)
-			contentSize += int64(n)
+			return nil, err
 		}
 
-		return nil
-	}()
-
-	buf := bytes.Buffer{}
-	if _, err := io.CopyN(&buf, pipeReader, 1); err == nil {
-		contentID, err := tgs.uploadTelegramFile(
-			ctx,
-			io.MultiReader(&buf, pipeReader),
+		var (
+			limitedContent = io.LimitReader(
+				io.MultiReader(&buf, content),
+				tgs.objectMaxContentBytes,
+			)
+			limitedContentSize int64
 		)
+
+		pipeReader, pipeWriter := io.Pipe()
+		go func() (err error) {
+			defer func() {
+				pipeWriter.CloseWithError(err)
+			}()
+
+			var (
+				buf   = make([]byte, objectEncryptedChunkSize)
+				nonce = make([]byte, chacha20poly1305.NonceSize)
+			)
+
+			for {
+				n, err := io.ReadFull(
+					limitedContent,
+					buf[:objectChunkSize],
+				)
+				if err != nil {
+					if errors.Is(err, io.EOF) {
+						break
+					} else if !errors.Is(
+						err,
+						io.ErrUnexpectedEOF,
+					) {
+						return err
+					}
+				}
+
+				if err := readNonce(nonce); err != nil {
+					return err
+				}
+
+				if _, err := pipeWriter.Write(
+					nonce,
+				); err != nil {
+					return err
+				}
+
+				if _, err := pipeWriter.Write(aead.Seal(
+					buf[:0],
+					nonce,
+					buf[:n],
+					nil,
+				)); err != nil {
+					return err
+				}
+
+				limitedContentSize += int64(n)
+			}
+
+			return nil
+		}()
+
+		limitedContentID, err := tgs.uploadTelegramFile(ctx, pipeReader)
 		if err != nil {
 			pipeReader.CloseWithError(err)
 			return nil, err
 		}
 
 		contents = append(contents, &objectContent{
-			ID:   contentID,
-			Size: contentSize,
+			ID:   limitedContentID,
+			Size: limitedContentSize,
 		})
-	} else if !errors.Is(err, io.EOF) {
-		pipeReader.CloseWithError(err)
-		return nil, err
+		size += limitedContentSize
 	}
 
 	hashMidstate, err := hashFunc.(encoding.BinaryMarshaler).MarshalBinary()
@@ -391,6 +361,7 @@ func (tgs *TGStore) append(
 		return nil, err
 	}
 
+	buf := bytes.Buffer{}
 	if id, err = tgs.uploadTelegramFile(
 		ctx,
 		io.TeeReader(
