@@ -7,9 +7,11 @@ package tgstore
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -199,7 +201,158 @@ func (tgs *TGStore) appendObject(
 	key []byte,
 	content io.Reader,
 ) (*Object, error) {
-	return nil, errors.New("not implemented")
+	aead, err := chacha20poly1305.New(key)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		contents []*objectContent
+		size     int64
+		hashFunc = sha256.New()
+	)
+
+	content = io.TeeReader(content, hashFunc)
+
+	if id != "" {
+		object, err := tgs.DownloadObject(ctx, id, key)
+		if err != nil {
+			return nil, err
+		}
+
+		contents = object.contents
+		size = object.Size
+		if len(contents) > 0 {
+			lc := contents[len(contents)-1]
+			if lc.Size < 8<<20 {
+				lcr, err := lc.newReader(ctx, aead, 0)
+				if err != nil {
+					return nil, err
+				}
+				defer lcr.Close()
+
+				content = io.MultiReader(lcr, content)
+
+				contents = contents[:len(contents)-1]
+				size -= lc.Size
+			}
+		}
+
+		if err := hashFunc.(encoding.BinaryUnmarshaler).
+			UnmarshalBinary(object.hashMidstate); err != nil {
+			return nil, err
+		}
+	}
+
+	var contentSize int64
+
+	pipeReader, pipeWriter := io.Pipe()
+	go func() (err error) {
+		defer func() {
+			pipeWriter.CloseWithError(err)
+		}()
+
+		var (
+			buf   = make([]byte, objectEncryptedChunkSize)
+			nonce = make([]byte, chacha20poly1305.NonceSize)
+		)
+
+		for {
+			n, err := io.ReadFull(content, buf[:objectChunkSize])
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				} else if !errors.Is(err, io.ErrUnexpectedEOF) {
+					return err
+				}
+			}
+
+			if err := readNonce(nonce); err != nil {
+				return err
+			}
+
+			if _, err := pipeWriter.Write(nonce); err != nil {
+				return err
+			}
+
+			if _, err := pipeWriter.Write(aead.Seal(
+				buf[:0],
+				nonce,
+				buf[:n],
+				nil,
+			)); err != nil {
+				return err
+			}
+
+			size += int64(n)
+			contentSize += int64(n)
+		}
+
+		return nil
+	}()
+
+	buf := bytes.Buffer{}
+	if _, err := io.CopyN(&buf, pipeReader, 1); err == nil {
+		contentID, err := tgs.uploadTelegramFile(
+			ctx,
+			io.MultiReader(&buf, pipeReader),
+		)
+		if err != nil {
+			pipeReader.CloseWithError(err)
+			return nil, err
+		}
+
+		contents = append(contents, &objectContent{
+			ID:   contentID,
+			Size: contentSize,
+		})
+	} else if !errors.Is(err, io.EOF) {
+		pipeReader.CloseWithError(err)
+		return nil, err
+	}
+
+	hashMidstate, err := hashFunc.(encoding.BinaryMarshaler).MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+
+	metadataJSON, err := json.Marshal(objectMetadata{
+		Contents:     contents,
+		Size:         size,
+		HashMidstate: base64.StdEncoding.EncodeToString(hashMidstate),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	nonce := make([]byte, chacha20poly1305.NonceSize)
+	if err := readNonce(nonce); err != nil {
+		return nil, err
+	}
+
+	if id, err = tgs.uploadTelegramFile(
+		ctx,
+		io.MultiReader(
+			bytes.NewReader(nonce),
+			bytes.NewReader(aead.Seal(
+				nil,
+				nonce,
+				metadataJSON,
+				nil,
+			)),
+		),
+	); err != nil {
+		return nil, err
+	}
+
+	return &Object{
+		ID:           id,
+		Size:         size,
+		Checksum:     hashFunc.Sum(nil),
+		aead:         aead,
+		contents:     contents,
+		hashMidstate: hashMidstate,
+	}, nil
 }
 
 // DownloadObject downloads the object targeted by the id from the cloud. It
@@ -270,7 +423,6 @@ func (tgs *TGStore) DownloadObject(
 		Checksum:     hashFunc.Sum(nil),
 		aead:         aead,
 		contents:     metadata.Contents,
-		contentSets:  metadata.ContentSets,
 		hashMidstate: hashMidstate,
 	}, nil
 }
@@ -384,6 +536,18 @@ func isRetryableTelegramBotAPIError(err error) bool {
 		strings.Contains(em, "Bad Gateway") ||
 		strings.Contains(em, "Service Unavailable") ||
 		strings.Contains(em, "Gateway Timeout")
+}
+
+// readNonceMutex is the `sync.Mutex` for the `readNonce`.
+var readNonceMutex sync.Mutex
+
+// readNonce reads nonce to the b.
+func readNonce(b []byte) error {
+	readNonceMutex.Lock()
+	defer readNonceMutex.Unlock()
+	binary.BigEndian.PutUint64(b[:8], uint64(time.Now().UnixNano()))
+	_, err := rand.Read(b[8:])
+	return err
 }
 
 // countReader is used to count the number of bytes read from the underlying

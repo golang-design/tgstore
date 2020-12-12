@@ -28,16 +28,14 @@ type Object struct {
 
 	aead         cipher.AEAD
 	contents     []*objectContent
-	contentSets  []*objectContentSet
 	hashMidstate []byte
 }
 
 // objectMetadata is the metadata of the `Object`.
 type objectMetadata struct {
-	Contents     []*objectContent    `json:"contents"`
-	ContentSets  []*objectContentSet `json:"content_sets,omitempty"`
-	Size         int64               `json:"size"`
-	HashMidstate string              `json:"hash_midstate"`
+	Contents     []*objectContent `json:"contents"`
+	Size         int64            `json:"size"`
+	HashMidstate string           `json:"hash_midstate"`
 }
 
 // objectContent is the unit of the `Object`.
@@ -55,43 +53,26 @@ func (oc *objectContent) newReader(
 	return nil, errors.New("not implemented")
 }
 
-// objectContentSet is the set of the `objectContent`.
-type objectContentSet struct {
-	ID    string `json:"id"`
-	Size  int64  `json:"size"`
-	Count int    `json:"count"`
-}
-
-// contents returns the list of the `objectContent` from the ocs.
-func (ocs *objectContentSet) contents(
-	ctx context.Context,
-	aead cipher.AEAD,
-) ([]*objectContent, error) {
-	return nil, errors.New("not implemented")
-}
-
 // NewReader returns a new instance of the `ObjectReader`.
 func (o *Object) NewReader(ctx context.Context) (*ObjectReader, error) {
 	return &ObjectReader{
-		ctx:         ctx,
-		aead:        o.aead,
-		contents:    o.contents,
-		contentSets: o.contentSets,
-		size:        o.Size,
+		ctx:      ctx,
+		aead:     o.aead,
+		contents: o.contents,
+		size:     o.Size,
 	}, nil
 }
 
 // ObjectReader is the reader of the `Object`.
 type ObjectReader struct {
-	ctx         context.Context
-	mutex       sync.Mutex
-	aead        cipher.AEAD
-	contents    []*objectContent
-	contentSets []*objectContentSet
-	size        int64
-	offset      int64
-	closed      bool
-	readCloser  io.ReadCloser
+	ctx        context.Context
+	mutex      sync.Mutex
+	aead       cipher.AEAD
+	contents   []*objectContent
+	size       int64
+	offset     int64
+	closed     bool
+	readCloser io.ReadCloser
 }
 
 // Read implements the `io.Reader`.
@@ -113,56 +94,26 @@ func (or *ObjectReader) Read(b []byte) (int, error) {
 			}()
 
 			offset := or.offset
-			readContents := func(contents []*objectContent) error {
-				for _, content := range contents {
-					if content.Size > offset {
-						cr, err := content.newReader(
-							or.ctx,
-							or.aead,
-							offset,
-						)
-						if err != nil {
-							return err
-						}
-
-						_, err = io.Copy(pipeWriter, cr)
-						cr.Close()
-						if err != nil {
-							return err
-						}
-
-						offset = 0
-					} else {
-						offset -= content.Size
-					}
-				}
-
-				return nil
-			}
-
-			if err := readContents(or.contents); err != nil {
-				return err
-			}
-
-			// This loop is rarely executed, at least the size of
-			// the current object needs to exceed 5.7 TiB first.
-			for _, contentSet := range or.contentSets {
-				if contentSet.Size > offset {
-					contents, err := contentSet.contents(
+			for _, content := range or.contents {
+				if content.Size > offset {
+					cr, err := content.newReader(
 						or.ctx,
 						or.aead,
+						offset,
 					)
 					if err != nil {
 						return err
 					}
 
-					if err := readContents(
-						contents,
-					); err != nil {
+					_, err = io.Copy(pipeWriter, cr)
+					cr.Close()
+					if err != nil {
 						return err
 					}
+
+					offset = 0
 				} else {
-					offset -= contentSet.Size
+					offset -= content.Size
 				}
 			}
 
