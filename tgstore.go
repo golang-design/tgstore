@@ -90,7 +90,8 @@ type TGStore struct {
 	loadError             error
 	bot                   *telebot.Bot
 	chat                  *telebot.Chat
-	maxObjectContentBytes int64
+	objectMaxContentBytes int64
+	objectMinContentBytes int64
 	objectMetadataCache   *bigcache.BigCache
 }
 
@@ -137,9 +138,13 @@ func (tgs *TGStore) load() {
 		return
 	}
 
-	tgs.maxObjectContentBytes = int64(tgs.MaxFileBytes)
-	tgs.maxObjectContentBytes /= objectEncryptedChunkSize
-	tgs.maxObjectContentBytes *= objectChunkSize
+	tgs.objectMaxContentBytes = int64(tgs.MaxFileBytes)
+	tgs.objectMaxContentBytes /= objectEncryptedChunkSize
+	tgs.objectMaxContentBytes *= objectChunkSize
+
+	tgs.objectMinContentBytes = 20 << 20
+	tgs.objectMinContentBytes /= objectEncryptedChunkSize
+	tgs.objectMinContentBytes *= objectChunkSize
 
 	if tgs.MaxObjectMetadataCacheBytes < 1<<20 {
 		tgs.loadError = errors.New(
@@ -195,8 +200,8 @@ func (tgs *TGStore) AppendObject(
 		content = bytes.NewReader(nil)
 	}
 
-	buf := bytes.Buffer{}
 	for {
+		buf := bytes.Buffer{}
 		if _, err := io.CopyN(&buf, content, 1); err != nil {
 			if errors.Is(err, io.EOF) {
 				break
@@ -205,14 +210,13 @@ func (tgs *TGStore) AppendObject(
 			return nil, err
 		}
 
+		content = io.MultiReader(&buf, content)
+
 		object, err := tgs.appendObject(
 			ctx,
 			id,
 			key,
-			io.LimitReader(
-				io.MultiReader(&buf, content),
-				tgs.maxObjectContentBytes,
-			),
+			io.LimitReader(content, tgs.objectMaxContentBytes),
 		)
 		if err != nil {
 			return nil, err
@@ -260,7 +264,12 @@ func (tgs *TGStore) appendObject(
 		size = object.Size
 		if len(contents) > 0 {
 			lc := contents[len(contents)-1]
-			if lc.Size < 8<<20 {
+			if lc.Size < tgs.objectMinContentBytes {
+				content = io.LimitReader(
+					content,
+					tgs.objectMaxContentBytes-lc.Size,
+				)
+
 				lcr, err := lc.newReader(ctx, tgs, aead, 0)
 				if err != nil {
 					return nil, err
