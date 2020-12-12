@@ -225,7 +225,7 @@ func (tgs *TGStore) appendObject(
 		if len(contents) > 0 {
 			lc := contents[len(contents)-1]
 			if lc.Size < 8<<20 {
-				lcr, err := lc.newReader(ctx, aead, 0)
+				lcr, err := lc.newReader(ctx, tgs, aead, 0)
 				if err != nil {
 					return nil, err
 				}
@@ -349,6 +349,7 @@ func (tgs *TGStore) appendObject(
 		ID:           id,
 		Size:         size,
 		Checksum:     hashFunc.Sum(nil),
+		tgs:          tgs,
 		aead:         aead,
 		contents:     contents,
 		hashMidstate: hashMidstate,
@@ -421,6 +422,7 @@ func (tgs *TGStore) DownloadObject(
 		ID:           id,
 		Size:         metadata.Size,
 		Checksum:     hashFunc.Sum(nil),
+		tgs:          tgs,
 		aead:         aead,
 		contents:     metadata.Contents,
 		hashMidstate: hashMidstate,

@@ -1,10 +1,12 @@
 package tgstore
 
 import (
+	"bytes"
 	"context"
 	"crypto/cipher"
 	"errors"
 	"io"
+	"io/ioutil"
 	"os"
 	"sync"
 
@@ -26,37 +28,17 @@ type Object struct {
 	Size     int64
 	Checksum []byte
 
+	tgs          *TGStore
 	aead         cipher.AEAD
 	contents     []*objectContent
 	hashMidstate []byte
-}
-
-// objectMetadata is the metadata of the `Object`.
-type objectMetadata struct {
-	Contents     []*objectContent `json:"contents"`
-	Size         int64            `json:"size"`
-	HashMidstate string           `json:"hash_midstate"`
-}
-
-// objectContent is the unit of the `Object`.
-type objectContent struct {
-	ID   string `json:"id"`
-	Size int64  `json:"size"`
-}
-
-// newReader returns a new instance of the `io.ReadCloser`.
-func (oc *objectContent) newReader(
-	ctx context.Context,
-	aead cipher.AEAD,
-	offset int64,
-) (io.ReadCloser, error) {
-	return nil, errors.New("not implemented")
 }
 
 // NewReader returns a new instance of the `ObjectReader`.
 func (o *Object) NewReader(ctx context.Context) (*ObjectReader, error) {
 	return &ObjectReader{
 		ctx:      ctx,
+		tgs:      o.tgs,
 		aead:     o.aead,
 		contents: o.contents,
 		size:     o.Size,
@@ -67,6 +49,7 @@ func (o *Object) NewReader(ctx context.Context) (*ObjectReader, error) {
 type ObjectReader struct {
 	ctx        context.Context
 	mutex      sync.Mutex
+	tgs        *TGStore
 	aead       cipher.AEAD
 	contents   []*objectContent
 	size       int64
@@ -98,6 +81,7 @@ func (or *ObjectReader) Read(b []byte) (int, error) {
 				if content.Size > offset {
 					cr, err := content.newReader(
 						or.ctx,
+						or.tgs,
 						or.aead,
 						offset,
 					)
@@ -186,4 +170,87 @@ func (or *ObjectReader) Close() error {
 	or.closed = true
 
 	return nil
+}
+
+// objectMetadata is the metadata of the `Object`.
+type objectMetadata struct {
+	Contents     []*objectContent `json:"contents"`
+	Size         int64            `json:"size"`
+	HashMidstate string           `json:"hash_midstate"`
+}
+
+// objectContent is the unit of the `Object`.
+type objectContent struct {
+	ID   string `json:"id"`
+	Size int64  `json:"size"`
+}
+
+// newReader returns a new instance of the `io.ReadCloser`.
+func (oc *objectContent) newReader(
+	ctx context.Context,
+	tgs *TGStore,
+	aead cipher.AEAD,
+	offset int64,
+) (io.ReadCloser, error) {
+	if offset >= oc.Size {
+		return ioutil.NopCloser(bytes.NewReader(nil)), nil
+	}
+
+	fullChunkOffset := offset / objectChunkSize
+	offset -= fullChunkOffset * objectChunkSize
+
+	rc, err := tgs.downloadTelegramFile(
+		ctx,
+		oc.ID,
+		fullChunkOffset*objectEncryptedChunkSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	pipeReader, pipeWriter := io.Pipe()
+	go func() (err error) {
+		defer func() {
+			pipeWriter.CloseWithError(err)
+			rc.Close()
+		}()
+
+		buf := make([]byte, objectEncryptedChunkSize)
+		for {
+			n, err := io.ReadFull(rc, buf)
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				} else if !errors.Is(err, io.ErrUnexpectedEOF) {
+					return err
+				}
+			}
+
+			nonce := buf[:chacha20poly1305.NonceSize]
+			chunkContent := buf[chacha20poly1305.NonceSize:n]
+			if chunkContent, err = aead.Open(
+				chunkContent[:0],
+				nonce,
+				chunkContent,
+				nil,
+			); err != nil {
+				return err
+			}
+
+			if offset > 0 {
+				chunkContent = chunkContent[offset:]
+				offset = 0
+			}
+
+			if _, err := pipeWriter.Write(
+				chunkContent,
+			); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}()
+
+	return pipeReader, nil
 }
