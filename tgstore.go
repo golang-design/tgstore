@@ -6,6 +6,7 @@ package tgstore
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -370,6 +371,17 @@ func (tgs *TGStore) appendObject(
 		return nil, err
 	}
 
+	gzippedMetadataJSON := bytes.Buffer{}
+	gzippedMetadataJSONWriter := gzip.NewWriter(&gzippedMetadataJSON)
+	if _, err := io.Copy(
+		gzippedMetadataJSONWriter,
+		bytes.NewReader(metadataJSON),
+	); err != nil {
+		return nil, err
+	} else if err := gzippedMetadataJSONWriter.Close(); err != nil {
+		return nil, err
+	}
+
 	nonce := make([]byte, chacha20poly1305.NonceSize)
 	if err := readNonce(nonce); err != nil {
 		return nil, err
@@ -383,7 +395,7 @@ func (tgs *TGStore) appendObject(
 				bytes.NewReader(aead.Seal(
 					nil,
 					nonce,
-					metadataJSON,
+					gzippedMetadataJSON.Bytes(),
 					nil,
 				)),
 			),
@@ -429,29 +441,42 @@ func (tgs *TGStore) DownloadObject(
 		return nil, err
 	}
 
-	metadataJSON, _ := tgs.objectMetadataCache.Get(id)
-	if len(metadataJSON) == 0 {
+	gzippedMetadataJSON, _ := tgs.objectMetadataCache.Get(id)
+	if len(gzippedMetadataJSON) == 0 {
 		rc, err := tgs.downloadTelegramFile(ctx, id, 0)
 		if err != nil {
 			return nil, err
 		}
 		defer rc.Close()
 
-		if metadataJSON, err = ioutil.ReadAll(rc); err != nil {
+		if gzippedMetadataJSON, err = ioutil.ReadAll(rc); err != nil {
 			return nil, err
 		}
 
-		tgs.objectMetadataCache.Set(id, metadataJSON)
+		tgs.objectMetadataCache.Set(id, gzippedMetadataJSON)
 	}
 
-	nonce := metadataJSON[:chacha20poly1305.NonceSize]
-	metadataJSON = metadataJSON[chacha20poly1305.NonceSize:]
-	if metadataJSON, err = aead.Open(
-		metadataJSON[:0],
+	nonce := gzippedMetadataJSON[:chacha20poly1305.NonceSize]
+	gzippedMetadataJSON = gzippedMetadataJSON[chacha20poly1305.NonceSize:]
+	if gzippedMetadataJSON, err = aead.Open(
+		gzippedMetadataJSON[:0],
 		nonce,
-		metadataJSON,
+		gzippedMetadataJSON,
 		nil,
 	); err != nil {
+		return nil, err
+	}
+
+	gzippedMetadataJSONReader, err := gzip.NewReader(
+		bytes.NewReader(gzippedMetadataJSON),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer gzippedMetadataJSONReader.Close()
+
+	metadataJSON, err := ioutil.ReadAll(gzippedMetadataJSONReader)
+	if err != nil {
 		return nil, err
 	}
 
