@@ -172,21 +172,21 @@ func (tgs *TGStore) load() {
 	}
 }
 
-// UploadObject uploads the content to the cloud.
+// Upload uploads the content to the cloud.
 //
 // The lenth of the key must be 16.
-func (tgs *TGStore) UploadObject(
+func (tgs *TGStore) Upload(
 	ctx context.Context,
 	key []byte,
 	content io.Reader,
 ) (*Object, error) {
-	return tgs.AppendObject(ctx, "", key, content)
+	return tgs.Append(ctx, "", key, content)
 }
 
-// AppendObject appends the content to the object targeted by the id.
+// Append appends the content to the object targeted by the id.
 //
 // The lenth of the key must be 16.
-func (tgs *TGStore) AppendObject(
+func (tgs *TGStore) Append(
 	ctx context.Context,
 	id string,
 	key []byte,
@@ -213,7 +213,7 @@ func (tgs *TGStore) AppendObject(
 
 		content = io.MultiReader(&buf, content)
 
-		object, err := tgs.appendObject(
+		object, err := tgs.append(
 			ctx,
 			id,
 			key,
@@ -227,16 +227,16 @@ func (tgs *TGStore) AppendObject(
 	}
 
 	if id != "" {
-		return tgs.DownloadObject(ctx, id, key)
+		return tgs.Download(ctx, id, key)
 	}
 
-	return tgs.appendObject(ctx, id, key, content)
+	return tgs.append(ctx, id, key, content)
 }
 
-// appendObject appends the content to the object targeted by the id.
+// append appends the content to the object targeted by the id.
 //
 // The lenth of the key must be 16.
-func (tgs *TGStore) appendObject(
+func (tgs *TGStore) append(
 	ctx context.Context,
 	id string,
 	key []byte,
@@ -256,7 +256,7 @@ func (tgs *TGStore) appendObject(
 	content = io.TeeReader(content, hashFunc)
 
 	if id != "" {
-		object, err := tgs.DownloadObject(ctx, id, key)
+		object, err := tgs.Download(ctx, id, key)
 		if err != nil {
 			return nil, err
 		}
@@ -418,11 +418,11 @@ func (tgs *TGStore) appendObject(
 	}, nil
 }
 
-// DownloadObject downloads the object targeted by the id from the cloud. It
-// returns `os.ErrNotExist` if not found.
+// Download downloads the object targeted by the id from the cloud. It returns
+// `os.ErrNotExist` if not found.
 //
 // The lenth of the key must be 16.
-func (tgs *TGStore) DownloadObject(
+func (tgs *TGStore) Download(
 	ctx context.Context,
 	id string,
 	key []byte,
