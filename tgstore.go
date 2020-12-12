@@ -372,8 +372,12 @@ func (tgs *TGStore) append(
 	}
 
 	gzippedMetadataJSON := bytes.Buffer{}
-	gzippedMetadataJSONWriter := gzip.NewWriter(&gzippedMetadataJSON)
-	if _, err := io.Copy(
+	if gzippedMetadataJSONWriter, err := gzip.NewWriterLevel(
+		&gzippedMetadataJSON,
+		gzip.BestCompression,
+	); err != nil {
+		return nil, err
+	} else if _, err := io.Copy(
 		gzippedMetadataJSONWriter,
 		bytes.NewReader(metadataJSON),
 	); err != nil {
@@ -441,42 +445,41 @@ func (tgs *TGStore) Download(
 		return nil, err
 	}
 
-	gzippedMetadataJSON, _ := tgs.objectMetadataCache.Get(id)
-	if len(gzippedMetadataJSON) == 0 {
+	metadataJSON, _ := tgs.objectMetadataCache.Get(id)
+	if len(metadataJSON) == 0 {
 		rc, err := tgs.downloadTelegramFile(ctx, id, 0)
 		if err != nil {
 			return nil, err
 		}
 		defer rc.Close()
 
-		if gzippedMetadataJSON, err = ioutil.ReadAll(rc); err != nil {
+		if metadataJSON, err = ioutil.ReadAll(rc); err != nil {
 			return nil, err
 		}
 
-		tgs.objectMetadataCache.Set(id, gzippedMetadataJSON)
+		tgs.objectMetadataCache.Set(id, metadataJSON)
 	}
 
-	nonce := gzippedMetadataJSON[:chacha20poly1305.NonceSize]
-	gzippedMetadataJSON = gzippedMetadataJSON[chacha20poly1305.NonceSize:]
-	if gzippedMetadataJSON, err = aead.Open(
-		gzippedMetadataJSON[:0],
+	nonce := metadataJSON[:chacha20poly1305.NonceSize]
+	metadataJSON = metadataJSON[chacha20poly1305.NonceSize:]
+	if metadataJSON, err = aead.Open(
+		metadataJSON[:0],
 		nonce,
-		gzippedMetadataJSON,
+		metadataJSON,
 		nil,
 	); err != nil {
 		return nil, err
 	}
 
-	gzippedMetadataJSONReader, err := gzip.NewReader(
-		bytes.NewReader(gzippedMetadataJSON),
-	)
-	if err != nil {
+	if gzippedMetadataJSONReader, err := gzip.NewReader(
+		bytes.NewReader(metadataJSON),
+	); err != nil {
 		return nil, err
-	}
-	defer gzippedMetadataJSONReader.Close()
-
-	metadataJSON, err := ioutil.ReadAll(gzippedMetadataJSONReader)
-	if err != nil {
+	} else if metadataJSON, err = ioutil.ReadAll(
+		gzippedMetadataJSONReader,
+	); err != nil {
+		return nil, err
+	} else if err := gzippedMetadataJSONReader.Close(); err != nil {
 		return nil, err
 	}
 
