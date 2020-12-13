@@ -254,13 +254,12 @@ func (tgs *TGStore) Append(
 			return nil, err
 		}
 
-		var (
-			limitedContent = io.LimitReader(
+		limitedContent := &countReader{
+			r: io.LimitReader(
 				io.MultiReader(&buf, content),
 				tgs.objectMaxContentBytes,
-			)
-			limitedContentSize int64
-		)
+			),
+		}
 
 		pipeReader, pipeWriter := io.Pipe()
 		go func() (err error) {
@@ -307,8 +306,6 @@ func (tgs *TGStore) Append(
 				)); err != nil {
 					return err
 				}
-
-				limitedContentSize += int64(n)
 			}
 
 			return nil
@@ -322,9 +319,9 @@ func (tgs *TGStore) Append(
 
 		contents = append(contents, &objectContent{
 			ID:   limitedContentID,
-			Size: limitedContentSize,
+			Size: limitedContent.c,
 		})
-		size += limitedContentSize
+		size += limitedContent.c
 	}
 
 	hashMidstate, err := hashFunc.(encoding.BinaryMarshaler).MarshalBinary()
