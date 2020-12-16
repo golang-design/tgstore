@@ -37,11 +37,8 @@ type Object struct {
 // NewReader returns a new instance of the `ObjectReader`.
 func (o *Object) NewReader(ctx context.Context) (*ObjectReader, error) {
 	return &ObjectReader{
-		ctx:      ctx,
-		tgs:      o.tgs,
-		aead:     o.aead,
-		contents: o.contents,
-		size:     o.Size,
+		ctx:    ctx,
+		object: o,
 	}, nil
 }
 
@@ -49,10 +46,7 @@ func (o *Object) NewReader(ctx context.Context) (*ObjectReader, error) {
 type ObjectReader struct {
 	ctx        context.Context
 	mutex      sync.Mutex
-	tgs        *TGStore
-	aead       cipher.AEAD
-	contents   []*objectContent
-	size       int64
+	object     *Object
 	offset     int64
 	closed     bool
 	readCloser io.ReadCloser
@@ -65,7 +59,7 @@ func (or *ObjectReader) Read(b []byte) (int, error) {
 
 	if or.closed {
 		return 0, os.ErrClosed
-	} else if or.offset >= or.size {
+	} else if or.offset >= or.object.Size {
 		return 0, io.EOF
 	}
 
@@ -77,12 +71,12 @@ func (or *ObjectReader) Read(b []byte) (int, error) {
 			}()
 
 			offset := or.offset
-			for _, content := range or.contents {
+			for _, content := range or.object.contents {
 				if content.Size > offset {
 					cr, err := content.newReader(
 						or.ctx,
-						or.tgs,
-						or.aead,
+						or.object.tgs,
+						or.object.aead,
 						offset,
 					)
 					if err != nil {
@@ -127,7 +121,7 @@ func (or *ObjectReader) Seek(offset int64, whence int) (int64, error) {
 	case io.SeekCurrent:
 		offset += or.offset
 	case io.SeekEnd:
-		offset += or.size
+		offset += or.object.Size
 	default:
 		return 0, errors.New("invalid whence")
 	}
