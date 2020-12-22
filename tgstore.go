@@ -338,19 +338,23 @@ func (tgs *TGStore) Append(
 		return nil, err
 	}
 
-	gzippedMetadataJSON := bytes.Buffer{}
-	if gzippedMetadataJSONWriter, err := gzip.NewWriterLevel(
-		&gzippedMetadataJSON,
-		gzip.BestCompression,
-	); err != nil {
-		return nil, err
-	} else if _, err := io.Copy(
-		gzippedMetadataJSONWriter,
-		bytes.NewReader(metadataJSON),
-	); err != nil {
-		return nil, err
-	} else if err := gzippedMetadataJSONWriter.Close(); err != nil {
-		return nil, err
+	if len(metadataJSON) >= 1<<10 {
+		gzippedMetadataJSON := bytes.Buffer{}
+		if gzippedMetadataJSONWriter, err := gzip.NewWriterLevel(
+			&gzippedMetadataJSON,
+			gzip.BestCompression,
+		); err != nil {
+			return nil, err
+		} else if _, err := io.Copy(
+			gzippedMetadataJSONWriter,
+			bytes.NewReader(metadataJSON),
+		); err != nil {
+			return nil, err
+		} else if err := gzippedMetadataJSONWriter.Close(); err != nil {
+			return nil, err
+		}
+
+		metadataJSON = gzippedMetadataJSON.Bytes()
 	}
 
 	nonce := make([]byte, chacha20poly1305.NonceSize)
@@ -367,7 +371,7 @@ func (tgs *TGStore) Append(
 				bytes.NewReader(aead.Seal(
 					nil,
 					nonce,
-					gzippedMetadataJSON.Bytes(),
+					metadataJSON,
 					nil,
 				)),
 			),
@@ -441,13 +445,15 @@ func (tgs *TGStore) Download(
 
 	if gzippedMetadataJSONReader, err := gzip.NewReader(
 		bytes.NewReader(metadataJSON),
-	); err != nil {
-		return nil, err
-	} else if metadataJSON, err = ioutil.ReadAll(
-		gzippedMetadataJSONReader,
-	); err != nil {
-		return nil, err
-	} else if err := gzippedMetadataJSONReader.Close(); err != nil {
+	); err == nil {
+		if metadataJSON, err = ioutil.ReadAll(
+			gzippedMetadataJSONReader,
+		); err != nil {
+			return nil, err
+		} else if err := gzippedMetadataJSONReader.Close(); err != nil {
+			return nil, err
+		}
+	} else if !errors.Is(err, gzip.ErrHeader) {
 		return nil, err
 	}
 
