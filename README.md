@@ -4,6 +4,14 @@
 
 An encrypted object storage system with unlimited space backed by Telegram.
 
+Please only upload what you really need to upload, don't abuse any system.
+
+## Features
+
+* Unlimited storage space
+* Up to 50 TiB or more (depending on the [`tgstore.TGStore.MaxFileBytes`](https://pkg.go.dev/golang.design/x/tgstore#TGStore.MaxFileBytes)) per object
+* Crazy upload and download speed (try concurrency to make it happen)
+
 ## Installation
 
 Open your terminal and execute
