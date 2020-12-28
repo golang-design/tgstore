@@ -490,7 +490,17 @@ func (tgs *TGStore) uploadTelegramFile(
 	ctx context.Context,
 	content io.Reader,
 ) (string, error) {
-	startTime := time.Now()
+	head := make([]byte, 1<<20)
+	if n, err := io.ReadFull(content, head); err != nil {
+		switch {
+		case errors.Is(err, io.EOF):
+			head = nil
+		case errors.Is(err, io.ErrUnexpectedEOF):
+			head = head[:n]
+		default:
+			return "", err
+		}
+	}
 
 	cr := &countReader{
 		r: content,
@@ -502,12 +512,13 @@ Upload:
 	}
 
 	m, err := tgs.bot.Send(tgs.chat, &telebot.Document{
-		File: telebot.FromReader(cr),
+		File: telebot.FromReader(io.MultiReader(
+			bytes.NewReader(head),
+			cr,
+		)),
 	})
 	if err != nil {
-		if cr.c == 0 &&
-			isRetryableTelegramBotAPIError(err) &&
-			time.Now().Sub(startTime) < time.Minute {
+		if cr.c == 0 && isRetryableTelegramBotAPIError(err) {
 			time.Sleep(time.Second)
 			goto Upload
 		}
@@ -525,8 +536,6 @@ func (tgs *TGStore) downloadTelegramFile(
 	id string,
 	offset int64,
 ) (io.ReadCloser, error) {
-	startTime := time.Now()
-
 Ready:
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -538,8 +547,7 @@ Ready:
 			return nil, os.ErrNotExist
 		}
 
-		if isRetryableTelegramBotAPIError(err) &&
-			time.Now().Sub(startTime) < time.Minute {
+		if isRetryableTelegramBotAPIError(err) {
 			time.Sleep(time.Second)
 			goto Ready
 		}
@@ -567,8 +575,15 @@ Download:
 		return nil, err
 	}
 
-	if res.StatusCode != http.StatusOK {
-		if time.Now().Sub(startTime) < time.Minute {
+	if res.StatusCode >= http.StatusBadRequest {
+		switch res.StatusCode {
+		case http.StatusBadRequest,
+			http.StatusTooManyRequests,
+			http.StatusInternalServerError,
+			http.StatusBadGateway,
+			http.StatusServiceUnavailable,
+			http.StatusGatewayTimeout:
+			res.Body.Close()
 			time.Sleep(time.Second)
 			goto Download
 		}
@@ -591,6 +606,7 @@ func isRetryableTelegramBotAPIError(err error) bool {
 	em := err.Error()
 	return strings.Contains(em, "Bad Request") ||
 		strings.Contains(em, "Too Many Requests") ||
+		strings.Contains(em, "Internal Server Error") ||
 		strings.Contains(em, "Bad Gateway") ||
 		strings.Contains(em, "Service Unavailable") ||
 		strings.Contains(em, "Gateway Timeout")
