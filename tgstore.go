@@ -570,6 +570,10 @@ Download:
 		return nil, err
 	}
 
+	if offset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+	}
+
 	res, err := tgs.HTTPClient.Do(req)
 	if err != nil {
 		return nil, err
