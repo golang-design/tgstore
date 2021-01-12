@@ -91,6 +91,7 @@ type TGStore struct {
 	loadError             error
 	bot                   *telebot.Bot
 	chat                  *telebot.Chat
+	fileHeadPool          sync.Pool
 	objectMaxContentBytes int64
 	objectMinContentBytes int64
 	objectMetadataCache   *bigcache.BigCache
@@ -106,6 +107,11 @@ func New() *TGStore {
 		MaxFileBytes:                20 << 20,
 		MaxObjectMetadataCacheBytes: 1 << 20,
 		HTTPClient:                  http.DefaultClient,
+		fileHeadPool: sync.Pool{
+			New: func() interface{} {
+				return make([]byte, 1<<20)
+			},
+		},
 	}
 }
 
@@ -490,7 +496,9 @@ func (tgs *TGStore) uploadTelegramFile(
 	ctx context.Context,
 	content io.Reader,
 ) (string, error) {
-	head := make([]byte, 1<<20)
+	head := tgs.fileHeadPool.Get().([]byte)[:1<<20]
+	defer tgs.fileHeadPool.Put(head)
+
 	if n, err := io.ReadFull(content, head); err != nil {
 		switch {
 		case errors.Is(err, io.EOF):
