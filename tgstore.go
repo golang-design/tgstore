@@ -8,10 +8,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -27,7 +25,19 @@ import (
 
 	"github.com/allegro/bigcache/v3"
 	"golang.org/x/crypto/chacha20poly1305"
+	"golang.org/x/crypto/poly1305"
 	"gopkg.in/tucnak/telebot.v2"
+)
+
+const (
+	// telegramFileChunkSize is the chunk size of Telegram file.
+	telegramFileChunkSize = 64 << 10
+
+	// telegramFileEncryptedChunkSize is the encrypted chunk size of
+	// Telegram file.
+	telegramFileEncryptedChunkSize = chacha20poly1305.NonceSize +
+		telegramFileChunkSize +
+		poly1305.TagSize
 )
 
 // TGStore is the top-level struct of this project.
@@ -87,14 +97,13 @@ type TGStore struct {
 	// Default value: `http.DefaultClient`
 	HTTPClient *http.Client `mapstructure:"-"`
 
-	loadOnce              sync.Once
-	loadError             error
-	bot                   *telebot.Bot
-	chat                  *telebot.Chat
-	fileHeadPool          sync.Pool
-	objectMaxContentBytes int64
-	objectMinContentBytes int64
-	objectMetadataCache   *bigcache.BigCache
+	loadOnce            sync.Once
+	loadError           error
+	bot                 *telebot.Bot
+	chat                *telebot.Chat
+	fileHeadPool        sync.Pool
+	objectSplitSize     int64
+	objectMetadataCache *bigcache.BigCache
 }
 
 // New returns a new instance of the `TGStore` with default field values.
@@ -145,13 +154,9 @@ func (tgs *TGStore) load() {
 		return
 	}
 
-	tgs.objectMaxContentBytes = int64(tgs.MaxFileBytes)
-	tgs.objectMaxContentBytes /= objectEncryptedChunkSize
-	tgs.objectMaxContentBytes *= objectChunkSize
-
-	tgs.objectMinContentBytes = 20 << 20
-	tgs.objectMinContentBytes /= objectEncryptedChunkSize
-	tgs.objectMinContentBytes *= objectChunkSize
+	tgs.objectSplitSize = int64(tgs.MaxFileBytes)
+	tgs.objectSplitSize /= telegramFileEncryptedChunkSize
+	tgs.objectSplitSize *= telegramFileChunkSize
 
 	if tgs.MaxObjectMetadataCacheBytes < 1<<20 {
 		tgs.loadError = errors.New(
@@ -160,6 +165,7 @@ func (tgs *TGStore) load() {
 		return
 	}
 
+	maxObjectMetadataCacheMB := tgs.MaxObjectMetadataCacheBytes / (1 << 20)
 	if tgs.objectMetadataCache, tgs.loadError = bigcache.NewBigCache(
 		bigcache.Config{
 			Shards:             1024,
@@ -167,7 +173,7 @@ func (tgs *TGStore) load() {
 			CleanWindow:        10 * time.Second,
 			MaxEntriesInWindow: 1000 * 10 * 60,
 			MaxEntrySize:       500,
-			HardMaxCacheSize:   tgs.MaxObjectMetadataCacheBytes / (1 << 20),
+			HardMaxCacheSize:   maxObjectMetadataCacheMB,
 		},
 	); tgs.loadError != nil {
 		tgs.loadError = fmt.Errorf(
@@ -180,326 +186,251 @@ func (tgs *TGStore) load() {
 
 // Upload uploads the content to the cloud.
 //
-// The lenth of the key must be 16.
+// Note that the returned id is not guaranteed for a fixed length.
+//
+// The lenth of the secretKey must be 16.
 func (tgs *TGStore) Upload(
 	ctx context.Context,
-	key []byte,
+	secretKey []byte,
 	content io.Reader,
-) (*Object, error) {
-	return tgs.Append(ctx, "", key, content)
-}
-
-// Append appends the content to the object targeted by the id.
-//
-// The lenth of the key must be 16.
-func (tgs *TGStore) Append(
-	ctx context.Context,
-	id string,
-	key []byte,
-	content io.Reader,
-) (*Object, error) {
+) (string, error) {
 	tgs.loadOnce.Do(tgs.load)
 	if tgs.loadError != nil {
-		return nil, tgs.loadError
+		return "", tgs.loadError
 	}
 
-	aead, err := chacha20poly1305.New(key)
+	aead, err := chacha20poly1305.New(secretKey)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	var (
-		contents []*objectContent
-		size     int64
-		hashFunc = sha256.New()
-	)
-
-	if content != nil {
-		content = io.TeeReader(content, hashFunc)
-	} else {
-		content = bytes.NewReader(nil)
+	if content == nil {
+		return "0", nil
 	}
 
-	if id != "" {
-		object, err := tgs.Download(ctx, id, key)
-		if err != nil {
-			return nil, err
-		}
-
-		contents = object.contents
-		size = object.Size
-		if len(contents) > 0 {
-			lc := contents[len(contents)-1]
-			if lc.Size < tgs.objectMinContentBytes {
-				lcr, err := lc.newReader(ctx, tgs, aead, 0)
-				if err != nil {
-					return nil, err
-				}
-				defer lcr.Close()
-
-				content = io.MultiReader(lcr, content)
-
-				contents = contents[:len(contents)-1]
-				size -= lc.Size
-			}
-		}
-
-		if err := hashFunc.(encoding.BinaryUnmarshaler).
-			UnmarshalBinary(object.hashMidstate); err != nil {
-			return nil, err
-		}
-	}
-
-	for {
-		buf := bytes.Buffer{}
-		if _, err := io.CopyN(&buf, content, 1); err != nil {
+	metadata := objectMetadata{}
+	for buf := bytes.NewBuffer(nil); ; {
+		if _, err := io.CopyN(buf, content, 1); err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}
 
-			return nil, err
+			return "", err
 		}
 
-		limitedContent := &countReader{
+		part := &countReader{
 			r: io.LimitReader(
-				io.MultiReader(&buf, content),
-				tgs.objectMaxContentBytes,
+				io.MultiReader(buf, content),
+				tgs.objectSplitSize,
 			),
 		}
 
-		pipeReader, pipeWriter := io.Pipe()
-		go func() (err error) {
-			defer func() {
-				pipeWriter.CloseWithError(err)
-			}()
-
-			var (
-				buf   = make([]byte, objectEncryptedChunkSize)
-				nonce = make([]byte, chacha20poly1305.NonceSize)
-			)
-
-			for {
-				n, err := io.ReadFull(
-					limitedContent,
-					buf[:objectChunkSize],
-				)
-				if err != nil {
-					if errors.Is(err, io.EOF) {
-						break
-					} else if !errors.Is(
-						err,
-						io.ErrUnexpectedEOF,
-					) {
-						return err
-					}
-				}
-
-				if err := readNonce(nonce); err != nil {
-					return err
-				}
-
-				if _, err := pipeWriter.Write(
-					nonce,
-				); err != nil {
-					return err
-				}
-
-				if _, err := pipeWriter.Write(aead.Seal(
-					buf[:0],
-					nonce,
-					buf[:n],
-					nil,
-				)); err != nil {
-					return err
-				}
-			}
-
-			return nil
-		}()
-
-		limitedContentID, err := tgs.uploadTelegramFile(ctx, pipeReader)
+		tgfID, err := tgs.uploadTelegramFile(ctx, aead, part)
 		if err != nil {
-			pipeReader.CloseWithError(err)
-			return nil, err
+			return "", err
 		}
 
-		contents = append(contents, &objectContent{
-			ID:   limitedContentID,
-			Size: limitedContent.c,
-		})
-		size += limitedContent.c
+		metadata.PartIDs = append(metadata.PartIDs, tgfID)
+		metadata.Size += part.c
 	}
 
-	hashMidstate, err := hashFunc.(encoding.BinaryMarshaler).MarshalBinary()
-	if err != nil {
-		return nil, err
-	}
-
-	metadataJSON, err := json.Marshal(objectMetadata{
-		Contents:     contents,
-		Size:         size,
-		HashMidstate: base64.StdEncoding.EncodeToString(hashMidstate),
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if len(metadataJSON) >= 1<<10 {
-		gzippedMetadataJSON := bytes.Buffer{}
-		if gzippedMetadataJSONWriter, err := gzip.NewWriterLevel(
-			&gzippedMetadataJSON,
-			gzip.BestCompression,
-		); err != nil {
-			return nil, err
-		} else if _, err := io.Copy(
-			gzippedMetadataJSONWriter,
-			bytes.NewReader(metadataJSON),
-		); err != nil {
-			return nil, err
-		} else if err := gzippedMetadataJSONWriter.Close(); err != nil {
-			return nil, err
+	switch len(metadata.PartIDs) {
+	case 0:
+		return "0", nil
+	case 1:
+		metadataJSON, err := json.Marshal(metadata)
+		if err != nil {
+			return "", err
 		}
 
-		metadataJSON = gzippedMetadataJSON.Bytes()
+		id := fmt.Sprint("0", metadata.PartIDs[0])
+		tgs.objectMetadataCache.Set(id, metadataJSON)
+
+		return id, nil
 	}
 
-	nonce := make([]byte, chacha20poly1305.NonceSize)
-	if err := readNonce(nonce); err != nil {
-		return nil, err
+	metadata.SplitSize = tgs.objectSplitSize
+
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return "", err
 	}
 
-	buf := bytes.Buffer{}
-	if id, err = tgs.uploadTelegramFile(
-		ctx,
-		io.TeeReader(
-			io.MultiReader(
-				bytes.NewReader(nonce),
-				bytes.NewReader(aead.Seal(
-					nil,
-					nonce,
-					metadataJSON,
-					nil,
-				)),
-			),
-			&buf,
-		),
+	gzippedMetadataJSON := bytes.Buffer{}
+	if gw, err := gzip.NewWriterLevel(
+		&gzippedMetadataJSON,
+		gzip.BestCompression,
 	); err != nil {
-		return nil, err
+		return "", err
+	} else if _, err := io.Copy(
+		gw,
+		bytes.NewReader(metadataJSON),
+	); err != nil {
+		return "", err
+	} else if err := gw.Close(); err != nil {
+		return "", err
 	}
 
-	tgs.objectMetadataCache.Set(id, buf.Bytes())
+	tgfID, err := tgs.uploadTelegramFile(ctx, aead, &gzippedMetadataJSON)
+	if err != nil {
+		return "", err
+	}
 
-	return &Object{
-		ID:           id,
-		Size:         size,
-		Checksum:     hashFunc.Sum(nil),
-		tgs:          tgs,
-		aead:         aead,
-		contents:     contents,
-		hashMidstate: hashMidstate,
-	}, nil
+	id := fmt.Sprint("1", tgfID)
+	tgs.objectMetadataCache.Set(id, metadataJSON)
+
+	return id, nil
 }
 
 // Download downloads the object targeted by the id from the cloud. It returns
 // `os.ErrNotExist` if not found.
 //
-// The lenth of the key must be 16.
+// The lenth of the secretKey must be 16.
 func (tgs *TGStore) Download(
 	ctx context.Context,
+	secretKey []byte,
 	id string,
-	key []byte,
-) (*Object, error) {
+) (*ObjectReader, error) {
 	tgs.loadOnce.Do(tgs.load)
 	if tgs.loadError != nil {
 		return nil, tgs.loadError
 	}
 
-	if id == "" {
-		return nil, os.ErrNotExist
-	}
-
-	aead, err := chacha20poly1305.New(key)
+	aead, err := chacha20poly1305.New(secretKey)
 	if err != nil {
 		return nil, err
 	}
 
-	metadataJSON, _ := tgs.objectMetadataCache.Get(id)
-	if len(metadataJSON) == 0 {
-		rc, err := tgs.downloadTelegramFile(ctx, id, 0)
-		if err != nil {
+	switch id {
+	case "":
+		return nil, os.ErrNotExist
+	case "0":
+		return &ObjectReader{}, nil
+	}
+
+	reader := &ObjectReader{
+		ctx:  ctx,
+		aead: aead,
+		tgs:  tgs,
+	}
+
+	if metadataJSON, err := tgs.objectMetadataCache.Get(id); err == nil {
+		if err := json.Unmarshal(
+			metadataJSON,
+			&reader.metadata,
+		); err != nil {
 			return nil, err
 		}
-		defer rc.Close()
 
-		if metadataJSON, err = ioutil.ReadAll(rc); err != nil {
+		return reader, nil
+	}
+
+	switch id[0] {
+	case '0':
+		reader.metadata.PartIDs = []string{id[1:]}
+		if reader.metadata.Size, err = tgs.sizeTelegramFile(
+			ctx,
+			reader.metadata.PartIDs[0],
+		); err != nil {
+			return nil, err
+		}
+
+		metadataJSON, err := json.Marshal(reader.metadata)
+		if err != nil {
 			return nil, err
 		}
 
 		tgs.objectMetadataCache.Set(id, metadataJSON)
-	}
-
-	nonce := metadataJSON[:chacha20poly1305.NonceSize]
-	metadataJSON = metadataJSON[chacha20poly1305.NonceSize:]
-	if metadataJSON, err = aead.Open(
-		metadataJSON[:0],
-		nonce,
-		metadataJSON,
-		nil,
-	); err != nil {
-		return nil, err
-	}
-
-	if gzippedMetadataJSONReader, err := gzip.NewReader(
-		bytes.NewReader(metadataJSON),
-	); err == nil {
-		if metadataJSON, err = ioutil.ReadAll(
-			gzippedMetadataJSONReader,
-		); err != nil {
-			return nil, err
-		} else if err := gzippedMetadataJSONReader.Close(); err != nil {
+	case '1':
+		tgfrc, err := tgs.downloadTelegramFile(ctx, aead, id[1:], 0)
+		if err != nil {
 			return nil, err
 		}
-	} else if !errors.Is(err, gzip.ErrHeader) {
-		return nil, err
+		defer tgfrc.Close()
+
+		gr, err := gzip.NewReader(tgfrc)
+		if err != nil {
+			return nil, err
+		}
+		defer gr.Close()
+
+		metadataJSON, err := ioutil.ReadAll(gr)
+		if err != nil {
+			return nil, err
+		}
+
+		tgs.objectMetadataCache.Set(id, metadataJSON)
+
+		if err := json.Unmarshal(
+			metadataJSON,
+			&reader.metadata,
+		); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, os.ErrNotExist
 	}
 
-	metadata := &objectMetadata{}
-	if err := json.Unmarshal(metadataJSON, metadata); err != nil {
-		return nil, err
-	}
-
-	hashMidstate, err := base64.StdEncoding.
-		DecodeString(metadata.HashMidstate)
-	if err != nil {
-		return nil, err
-	}
-
-	hashFunc := sha256.New()
-	if err := hashFunc.(encoding.BinaryUnmarshaler).
-		UnmarshalBinary(hashMidstate); err != nil {
-		return nil, err
-	}
-
-	return &Object{
-		ID:           id,
-		Size:         metadata.Size,
-		Checksum:     hashFunc.Sum(nil),
-		tgs:          tgs,
-		aead:         aead,
-		contents:     metadata.Contents,
-		hashMidstate: hashMidstate,
-	}, nil
+	return reader, nil
 }
 
 // uploadTelegramFile uploads the content to the Telegram.
 func (tgs *TGStore) uploadTelegramFile(
 	ctx context.Context,
+	aead cipher.AEAD,
 	content io.Reader,
 ) (string, error) {
+	pr, pw := io.Pipe()
+	defer pr.Close()
+
+	go func() (err error) {
+		defer func() {
+			pw.CloseWithError(err)
+		}()
+
+		var (
+			buf   = make([]byte, telegramFileEncryptedChunkSize)
+			nonce = make([]byte, chacha20poly1305.NonceSize)
+		)
+
+		for {
+			n, err := io.ReadFull(
+				content,
+				buf[:telegramFileChunkSize],
+			)
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				} else if !errors.Is(err, io.ErrUnexpectedEOF) {
+					return err
+				}
+			}
+
+			if err := readNonce(nonce); err != nil {
+				return err
+			}
+
+			if _, err := pw.Write(nonce); err != nil {
+				return err
+			}
+
+			if _, err := pw.Write(aead.Seal(
+				buf[:0],
+				nonce,
+				buf[:n],
+				nil,
+			)); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}()
+
 	head := tgs.fileHeadPool.Get().([]byte)[:1<<20]
 	defer tgs.fileHeadPool.Put(head)
 
-	if n, err := io.ReadFull(content, head); err != nil {
+	if n, err := io.ReadFull(pr, head); err != nil {
 		switch {
 		case errors.Is(err, io.EOF):
 			head = nil
@@ -511,7 +442,7 @@ func (tgs *TGStore) uploadTelegramFile(
 	}
 
 	cr := &countReader{
-		r: content,
+		r: pr,
 	}
 
 Upload:
@@ -537,13 +468,13 @@ Upload:
 	return m.Document.FileID, nil
 }
 
-// downloadTelegramFile downloads the file targeted by the id from the Telegram.
+// requestTelegramFile requests the file targeted by the id from the Telegram.
 // It returns `os.ErrNotExist` if not found.
-func (tgs *TGStore) downloadTelegramFile(
+func (tgs *TGStore) requestTelegramFile(
 	ctx context.Context,
 	id string,
-	offset int64,
-) (io.ReadCloser, error) {
+	header http.Header,
+) (*http.Response, error) {
 Ready:
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -563,7 +494,7 @@ Ready:
 		return nil, err
 	}
 
-Download:
+Request:
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -578,8 +509,8 @@ Download:
 		return nil, err
 	}
 
-	if offset > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+	if header != nil {
+		req.Header = header
 	}
 
 	res, err := tgs.HTTPClient.Do(req)
@@ -597,7 +528,7 @@ Download:
 			http.StatusGatewayTimeout:
 			res.Body.Close()
 			time.Sleep(time.Second)
-			goto Download
+			goto Request
 		}
 
 		b, err := ioutil.ReadAll(res.Body)
@@ -609,7 +540,98 @@ Download:
 		return nil, fmt.Errorf("GET %s: %s: %s", req.URL, res.Status, b)
 	}
 
-	return res.Body, nil
+	return res, nil
+}
+
+// downloadTelegramFile downloads the file targeted by the id from the Telegram.
+// It returns `os.ErrNotExist` if not found.
+func (tgs *TGStore) downloadTelegramFile(
+	ctx context.Context,
+	aead cipher.AEAD,
+	id string,
+	offset int64,
+) (io.ReadCloser, error) {
+	offsetChunkCount := offset / telegramFileChunkSize
+	offset -= offsetChunkCount * telegramFileChunkSize
+
+	var reqHeader http.Header
+	if offset > 0 {
+		reqHeader = http.Header{}
+		reqHeader.Set("Range", fmt.Sprintf(
+			"bytes=%d-",
+			offsetChunkCount*telegramFileEncryptedChunkSize,
+		))
+	}
+
+	res, err := tgs.requestTelegramFile(ctx, id, reqHeader)
+	if err != nil {
+		return nil, err
+	}
+
+	pr, pw := io.Pipe()
+	go func() (err error) {
+		defer func() {
+			pw.CloseWithError(err)
+			res.Body.Close()
+		}()
+
+		buf := make([]byte, telegramFileEncryptedChunkSize)
+		for {
+			n, err := io.ReadFull(res.Body, buf)
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				} else if !errors.Is(err, io.ErrUnexpectedEOF) {
+					return err
+				}
+			}
+
+			nonce := buf[:chacha20poly1305.NonceSize]
+			chunk := buf[chacha20poly1305.NonceSize:n]
+			chunk, err = aead.Open(chunk[:0], nonce, chunk, nil)
+			if err != nil {
+				return err
+			}
+
+			if offset > 0 {
+				chunk = chunk[offset:]
+				offset = 0
+			}
+
+			if _, err := pw.Write(chunk); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}()
+
+	return pr, nil
+}
+
+// sizeTelegramFile sizes the file targeted by the id from the Telegram. It
+// returns `os.ErrNotExist` if not found.
+func (tgs *TGStore) sizeTelegramFile(
+	ctx context.Context,
+	id string,
+) (int64, error) {
+	res, err := tgs.requestTelegramFile(ctx, id, nil)
+	if err != nil {
+		return 0, err
+	}
+
+	res.Body.Close()
+
+	fullChunkCount := res.ContentLength / telegramFileEncryptedChunkSize
+	size := fullChunkCount * telegramFileChunkSize
+	if res.ContentLength%telegramFileEncryptedChunkSize != 0 {
+		size += res.ContentLength -
+			fullChunkCount*telegramFileEncryptedChunkSize -
+			telegramFileEncryptedChunkSize +
+			telegramFileChunkSize
+	}
+
+	return size, nil
 }
 
 // isRetryableTelegramBotAPIError reports whether the err is a retryable

@@ -49,16 +49,16 @@ func main() {
 	tgs.BotToken = "<your-telegram-bot-token"
 	tgs.ChatID = 1234567890
 
-	objectKey := make([]byte, chacha20poly1305.KeySize)
-	if _, err := rand.Read(objectKey); err != nil {
+	objectSecretKey := make([]byte, chacha20poly1305.KeySize)
+	if _, err := rand.Read(objectSecretKey); err != nil {
 		log.Fatal(err)
 	}
 
 	startTime := time.Now()
 
-	object, err := tgs.Upload(
+	objectID, err := tgs.Upload(
 		context.TODO(),
-		objectKey,
+		objectSecretKey,
 		strings.NewReader("Hello, 世界"),
 	)
 	if err != nil {
@@ -69,10 +69,10 @@ func main() {
 
 	startTime = time.Now()
 
-	downloadedObject, err := tgs.Download(
+	objectReader, err := tgs.Download(
 		context.TODO(),
+		objectSecretKey,
 		object.ID,
-		objectKey,
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -82,13 +82,7 @@ func main() {
 
 	startTime = time.Now()
 
-	rc, err := downloadedObject.NewReader(context.TODO())
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer rc.Close()
-
-	b, err := ioutil.ReadAll(rc)
+	b, err := ioutil.ReadAll(objectReader)
 	if err != nil {
 		log.Fatal(err)
 	}
