@@ -13,7 +13,7 @@ import (
 type objectMetadata struct {
 	PartIDs   []string `json:"part_ids"`
 	Size      int64    `json:"size"`
-	SplitSize int64    `json:"split_size"`
+	SplitSize int64    `json:"split_size,omitempty"`
 }
 
 // ObjectReader is the reader of the object.
