@@ -8,6 +8,11 @@ Please only upload what you really need to upload, don't abuse any system.
 
 ## Features
 
+* Extremely easy to use
+	* One function: [`tgstore.New`](https://pkg.go.dev/golang.design/x/tgstore#New)
+	* One struct: [`tgstore.TGStore`](https://pkg.go.dev/golang.design/x/tgstore#TGStore)
+		* [`tgstore.TGStore.Upload`](https://pkg.go.dev/golang.design/x/tgstore#TGStore.Upload)
+		* [`tgstore.TGStore.Download`](https://pkg.go.dev/golang.design/x/tgstore#TGStore.Download)
 * Unlimited storage space
 * Up to 50 TiB or more (depending on the [`tgstore.TGStore.MaxFileBytes`](https://pkg.go.dev/golang.design/x/tgstore#TGStore.MaxFileBytes)) per object
 * Crazy upload and download speed (try concurrency to make it happen)
