@@ -22,7 +22,7 @@ $ go get golang.design/x/tgstore
 
 done.
 
-> The only requirement is the [Go](https://golang.org), at least v1.13.
+> The only requirement is the [Go](https://golang.org), at least v1.16.
 
 ## Hello, 世界
 
@@ -35,7 +35,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"strings"
 	"time"
@@ -82,7 +82,7 @@ func main() {
 
 	startTime = time.Now()
 
-	b, err := ioutil.ReadAll(objectReader)
+	b, err := io.ReadAll(objectReader)
 	if err != nil {
 		log.Fatal(err)
 	}

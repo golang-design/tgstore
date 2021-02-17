@@ -15,9 +15,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"io/fs"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -283,14 +282,14 @@ func (tgs *TGStore) Upload(
 }
 
 // Download downloads the object targeted by the id from the cloud. It returns
-// `os.ErrNotExist` if not found.
+// `fs.ErrNotExist` if not found.
 //
 // The lenth of the secretKey must be 16.
 func (tgs *TGStore) Download(
 	ctx context.Context,
 	secretKey []byte,
 	id string,
-) (*ObjectReader, error) {
+) (io.ReadSeekCloser, error) {
 	tgs.loadOnce.Do(tgs.load)
 	if tgs.loadError != nil {
 		return nil, tgs.loadError
@@ -303,12 +302,12 @@ func (tgs *TGStore) Download(
 
 	switch id {
 	case "":
-		return nil, os.ErrNotExist
+		return nil, fs.ErrNotExist
 	case "0":
-		return &ObjectReader{}, nil
+		return &objectReader{}, nil
 	}
 
-	reader := &ObjectReader{
+	reader := &objectReader{
 		ctx:  ctx,
 		aead: aead,
 		tgs:  tgs,
@@ -354,7 +353,7 @@ func (tgs *TGStore) Download(
 		}
 		defer gr.Close()
 
-		metadataJSON, err := ioutil.ReadAll(gr)
+		metadataJSON, err := io.ReadAll(gr)
 		if err != nil {
 			return nil, err
 		}
@@ -368,7 +367,7 @@ func (tgs *TGStore) Download(
 			return nil, err
 		}
 	default:
-		return nil, os.ErrNotExist
+		return nil, fs.ErrNotExist
 	}
 
 	return reader, nil
@@ -469,7 +468,7 @@ Upload:
 }
 
 // requestTelegramFile requests the file targeted by the id from the Telegram.
-// It returns `os.ErrNotExist` if not found.
+// It returns `fs.ErrNotExist` if not found.
 func (tgs *TGStore) requestTelegramFile(
 	ctx context.Context,
 	id string,
@@ -483,7 +482,7 @@ Ready:
 	fileURL, err := tgs.bot.FileURLByID(id)
 	if err != nil {
 		if strings.Contains(err.Error(), "Not Found") {
-			return nil, os.ErrNotExist
+			return nil, fs.ErrNotExist
 		}
 
 		if isRetryableTelegramBotAPIError(err) {
@@ -531,7 +530,7 @@ Request:
 			goto Request
 		}
 
-		b, err := ioutil.ReadAll(res.Body)
+		b, err := io.ReadAll(res.Body)
 		res.Body.Close()
 		if err != nil {
 			return nil, err
@@ -544,7 +543,7 @@ Request:
 }
 
 // downloadTelegramFile downloads the file targeted by the id from the Telegram.
-// It returns `os.ErrNotExist` if not found.
+// It returns `fs.ErrNotExist` if not found.
 func (tgs *TGStore) downloadTelegramFile(
 	ctx context.Context,
 	aead cipher.AEAD,
@@ -610,7 +609,7 @@ func (tgs *TGStore) downloadTelegramFile(
 }
 
 // sizeTelegramFile sizes the file targeted by the id from the Telegram. It
-// returns `os.ErrNotExist` if not found.
+// returns `fs.ErrNotExist` if not found.
 func (tgs *TGStore) sizeTelegramFile(
 	ctx context.Context,
 	id string,

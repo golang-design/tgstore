@@ -5,7 +5,7 @@ import (
 	"crypto/cipher"
 	"errors"
 	"io"
-	"os"
+	"io/fs"
 	"sync"
 )
 
@@ -16,11 +16,8 @@ type objectMetadata struct {
 	SplitSize int64    `json:"split_size,omitempty"`
 }
 
-// ObjectReader is the reader of the object.
-//
-// TODO: Unexport the `ObjectReader` and use the `io.ReadSeekCloser` instead
-// once Go 1.16 is released.
-type ObjectReader struct {
+// objectReader is the reader of the object.
+type objectReader struct {
 	ctx        context.Context
 	mutex      sync.Mutex
 	tgs        *TGStore
@@ -32,12 +29,12 @@ type ObjectReader struct {
 }
 
 // Read implements the `io.Reader`.
-func (or *ObjectReader) Read(b []byte) (int, error) {
+func (or *objectReader) Read(b []byte) (int, error) {
 	or.mutex.Lock()
 	defer or.mutex.Unlock()
 
 	if or.closed {
-		return 0, os.ErrClosed
+		return 0, fs.ErrClosed
 	} else if or.offset >= or.metadata.Size {
 		return 0, io.EOF
 	}
@@ -102,12 +99,12 @@ func (or *ObjectReader) Read(b []byte) (int, error) {
 }
 
 // Seek implements the `io.Seeker`.
-func (or *ObjectReader) Seek(offset int64, whence int) (int64, error) {
+func (or *objectReader) Seek(offset int64, whence int) (int64, error) {
 	or.mutex.Lock()
 	defer or.mutex.Unlock()
 
 	if or.closed {
-		return 0, os.ErrClosed
+		return 0, fs.ErrClosed
 	}
 
 	switch whence {
@@ -139,12 +136,12 @@ func (or *ObjectReader) Seek(offset int64, whence int) (int64, error) {
 }
 
 // Close implements the `io.Closer`.
-func (or *ObjectReader) Close() error {
+func (or *objectReader) Close() error {
 	or.mutex.Lock()
 	defer or.mutex.Unlock()
 
 	if or.closed {
-		return os.ErrClosed
+		return fs.ErrClosed
 	}
 
 	if or.readCloser != nil {
