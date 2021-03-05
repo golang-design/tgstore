@@ -77,7 +77,7 @@ func main() {
 	objectReader, err := tgs.Download(
 		context.TODO(),
 		objectSecretKey,
-		object.ID,
+		objectID,
 	)
 	if err != nil {
 		log.Fatal(err)
