@@ -9,7 +9,6 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/cipher"
-	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -392,7 +391,7 @@ func (tgs *TGStore) uploadTelegramFile(
 			nonce = make([]byte, chacha20poly1305.NonceSize)
 		)
 
-		for {
+		for counter := uint64(1); ; counter++ {
 			n, err := io.ReadFull(
 				content,
 				buf[:telegramFileChunkSize],
@@ -405,9 +404,7 @@ func (tgs *TGStore) uploadTelegramFile(
 				}
 			}
 
-			if err := readNonce(nonce); err != nil {
-				return err
-			}
+			binary.LittleEndian.PutUint64(nonce, counter)
 
 			if _, err := pw.Write(nonce); err != nil {
 				return err
@@ -643,18 +640,6 @@ func isRetryableTelegramBotAPIError(err error) bool {
 		strings.Contains(em, "Bad Gateway") ||
 		strings.Contains(em, "Service Unavailable") ||
 		strings.Contains(em, "Gateway Timeout")
-}
-
-// readNonceMutex is the `sync.Mutex` for the `readNonce`.
-var readNonceMutex sync.Mutex
-
-// readNonce reads nonce to the b.
-func readNonce(b []byte) error {
-	readNonceMutex.Lock()
-	defer readNonceMutex.Unlock()
-	binary.BigEndian.PutUint64(b[:8], uint64(time.Now().UnixNano()))
-	_, err := rand.Read(b[8:])
-	return err
 }
 
 // countReader is used to count the number of bytes read from the underlying
