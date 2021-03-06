@@ -50,7 +50,7 @@ func (or *objectReader) Read(b []byte) (int, error) {
 		partIDs := or.metadata.PartIDs[offsetPartCount:]
 		if len(partIDs) == 1 {
 			var err error
-			if or.readCloser, err = or.tgs.downloadTelegramFile(
+			if or.readCloser, err = or.tgs.downloadTGFile(
 				or.ctx,
 				or.aead,
 				or.metadata.PartIDs[0],
@@ -66,7 +66,7 @@ func (or *objectReader) Read(b []byte) (int, error) {
 				}()
 
 				for _, partID := range partIDs {
-					prc, err := or.tgs.downloadTelegramFile(
+					prc, err := or.tgs.downloadTGFile(
 						or.ctx,
 						or.aead,
 						partID,

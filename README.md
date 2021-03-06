@@ -14,8 +14,8 @@ Please only upload what you really need to upload, don't abuse any system.
 		* [`tgstore.TGStore.Upload`](https://pkg.go.dev/golang.design/x/tgstore#TGStore.Upload)
 		* [`tgstore.TGStore.Download`](https://pkg.go.dev/golang.design/x/tgstore#TGStore.Download)
 * Unlimited storage space
-* Up to 50 TiB or more (depending on the [`tgstore.TGStore.MaxFileBytes`](https://pkg.go.dev/golang.design/x/tgstore#TGStore.MaxFileBytes)) per object
-* Crazy upload and download speed (try concurrency to make it happen)
+* Up to N PiB per object (please never try to find out what N is, you don't need that)
+* Crazy upload and download speed
 
 ## Installation
 
@@ -51,8 +51,12 @@ import (
 
 func main() {
 	tgs := tgstore.New()
-	tgs.BotToken = "<your-telegram-bot-token"
-	tgs.ChatID = 1234567890
+	tgs.MTProtoServerHost = "91.108.56.151:443" // Choose the one closest to you
+	tgs.MTProtoPublicKeys = "<your-mtproto-public-keys>"
+	tgs.AppAPIID = 1234567890
+	tgs.AppAPIHash = "<your-telegram-app-api-hash>"
+	tgs.BotToken = "<your-telegram-bot-token>"
+	tgs.ChannelID = 1234567890
 
 	objectSecretKey := make([]byte, chacha20poly1305.KeySize)
 	if _, err := rand.Read(objectSecretKey); err != nil {
