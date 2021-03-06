@@ -28,14 +28,12 @@ import (
 )
 
 const (
-	// telegramFileChunkSize is the chunk size of Telegram file.
-	telegramFileChunkSize = 64 << 10
+	// tgFileChunkSize is the chunk size of Telegram file.
+	tgFileChunkSize = 64 << 10
 
-	// telegramFileEncryptedChunkSize is the encrypted chunk size of
-	// Telegram file.
-	telegramFileEncryptedChunkSize = chacha20poly1305.NonceSize +
-		telegramFileChunkSize +
-		poly1305.TagSize
+	// tgFileEncryptedChunkSize is the encrypted chunk size of Telegram
+	// file.
+	tgFileEncryptedChunkSize = tgFileChunkSize + poly1305.TagSize
 )
 
 // TGStore is the top-level struct of this project.
@@ -153,8 +151,8 @@ func (tgs *TGStore) load() {
 	}
 
 	tgs.objectSplitSize = int64(tgs.MaxFileBytes)
-	tgs.objectSplitSize /= telegramFileEncryptedChunkSize
-	tgs.objectSplitSize *= telegramFileChunkSize
+	tgs.objectSplitSize /= tgFileEncryptedChunkSize
+	tgs.objectSplitSize *= tgFileChunkSize
 
 	if tgs.MaxObjectMetadataCacheBytes < 1<<20 {
 		tgs.loadError = errors.New(
@@ -387,14 +385,14 @@ func (tgs *TGStore) uploadTelegramFile(
 		}()
 
 		var (
-			buf   = make([]byte, telegramFileEncryptedChunkSize)
+			buf   = make([]byte, tgFileEncryptedChunkSize)
 			nonce = make([]byte, chacha20poly1305.NonceSize)
 		)
 
 		for counter := uint64(1); ; counter++ {
 			n, err := io.ReadFull(
 				content,
-				buf[:telegramFileChunkSize],
+				buf[:tgFileChunkSize],
 			)
 			if err != nil {
 				if errors.Is(err, io.EOF) {
@@ -405,10 +403,6 @@ func (tgs *TGStore) uploadTelegramFile(
 			}
 
 			binary.LittleEndian.PutUint64(nonce, counter)
-
-			if _, err := pw.Write(nonce); err != nil {
-				return err
-			}
 
 			if _, err := pw.Write(aead.Seal(
 				buf[:0],
@@ -547,15 +541,15 @@ func (tgs *TGStore) downloadTelegramFile(
 	id string,
 	offset int64,
 ) (io.ReadCloser, error) {
-	offsetChunkCount := offset / telegramFileChunkSize
-	offset -= offsetChunkCount * telegramFileChunkSize
+	offsetChunkCount := offset / tgFileChunkSize
+	offset -= offsetChunkCount * tgFileChunkSize
 
 	var reqHeader http.Header
 	if offset > 0 {
 		reqHeader = http.Header{}
 		reqHeader.Set("Range", fmt.Sprintf(
 			"bytes=%d-",
-			offsetChunkCount*telegramFileEncryptedChunkSize,
+			offsetChunkCount*tgFileEncryptedChunkSize,
 		))
 	}
 
@@ -571,8 +565,12 @@ func (tgs *TGStore) downloadTelegramFile(
 			res.Body.Close()
 		}()
 
-		buf := make([]byte, telegramFileEncryptedChunkSize)
-		for {
+		var (
+			buf   = make([]byte, tgFileEncryptedChunkSize)
+			nonce = make([]byte, chacha20poly1305.NonceSize)
+		)
+
+		for counter := uint64(offsetChunkCount + 1); ; counter++ {
 			n, err := io.ReadFull(res.Body, buf)
 			if err != nil {
 				if errors.Is(err, io.EOF) {
@@ -582,9 +580,9 @@ func (tgs *TGStore) downloadTelegramFile(
 				}
 			}
 
-			nonce := buf[:chacha20poly1305.NonceSize]
-			chunk := buf[chacha20poly1305.NonceSize:n]
-			chunk, err = aead.Open(chunk[:0], nonce, chunk, nil)
+			binary.LittleEndian.PutUint64(nonce[4:], counter)
+
+			chunk, err := aead.Open(buf[:0], nonce, buf[:n], nil)
 			if err != nil {
 				return err
 			}
@@ -618,13 +616,13 @@ func (tgs *TGStore) sizeTelegramFile(
 
 	res.Body.Close()
 
-	fullChunkCount := res.ContentLength / telegramFileEncryptedChunkSize
-	size := fullChunkCount * telegramFileChunkSize
-	if res.ContentLength%telegramFileEncryptedChunkSize != 0 {
+	fullChunkCount := res.ContentLength / tgFileEncryptedChunkSize
+	size := fullChunkCount * tgFileChunkSize
+	if res.ContentLength%tgFileEncryptedChunkSize != 0 {
 		size += res.ContentLength -
-			fullChunkCount*telegramFileEncryptedChunkSize -
-			telegramFileEncryptedChunkSize +
-			telegramFileChunkSize
+			fullChunkCount*tgFileEncryptedChunkSize -
+			tgFileEncryptedChunkSize +
+			tgFileChunkSize
 	}
 
 	return size, nil
