@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -487,7 +488,10 @@ func (tgs *TGStore) Delete(
 
 // tgChannelAccessHash returns the access hash of the Telegram channel targeted
 // by the id. It returns `fs.ErrNotExist` if not found.
-func (tgs *TGStore) tgChannelAccessHash(id int32) (int64, error) {
+func (tgs *TGStore) tgChannelAccessHash(
+	ctx context.Context,
+	id int32,
+) (int64, error) {
 	if ahi, ok := tgs.channelAccessHashes.Load(id); ok {
 		return ahi.(int64), nil
 	}
@@ -498,6 +502,24 @@ func (tgs *TGStore) tgChannelAccessHash(id int32) (int64, error) {
 		},
 	})
 	if err != nil {
+		switch {
+		case strings.Contains(
+			err.Error(),
+			"The provided channel is invalid",
+		):
+			return 0, fs.ErrNotExist
+		case strings.Contains(
+			err.Error(),
+			"You haven't joined this channel/supergroup",
+		):
+			return 0, fs.ErrNotExist
+		case strings.Contains(
+			err.Error(),
+			"Invalid message ID provided",
+		):
+			return 0, fs.ErrNotExist
+		}
+
 		return 0, err
 	}
 
@@ -509,6 +531,73 @@ func (tgs *TGStore) tgChannelAccessHash(id int32) (int64, error) {
 	tgs.channelAccessHashes.Store(id, c.AccessHash)
 
 	return c.AccessHash, nil
+}
+
+// tgDocument returns the `telegram.DocumentObj` targeted by the fileID. It
+// returns `fs.ErrNotExist` if not found.
+func (tgs *TGStore) tgDocument(
+	ctx context.Context,
+	fileID string,
+) (*telegram.DocumentObj, error) {
+	fileIDBytes, err := base64.RawURLEncoding.DecodeString(fileID)
+	if err != nil {
+		return nil, err
+	}
+
+	channelID := int32(binary.BigEndian.Uint32(fileIDBytes[:4]))
+	messageID := int32(binary.BigEndian.Uint32(fileIDBytes[4:]))
+
+	channelAccessHash, err := tgs.tgChannelAccessHash(ctx, channelID)
+	if err != nil {
+		return nil, err
+	}
+
+	message, err := tgs.client.ChannelsGetMessages(
+		&telegram.InputChannelObj{
+			ChannelID:  channelID,
+			AccessHash: channelAccessHash,
+		},
+		[]telegram.InputMessage{
+			&telegram.InputMessageID{
+				ID: messageID,
+			},
+		},
+	)
+	if err != nil {
+		switch {
+		case strings.Contains(
+			err.Error(),
+			"The provided channel is invalid",
+		):
+			return nil, fs.ErrNotExist
+		case strings.Contains(
+			err.Error(),
+			"You haven't joined this channel/supergroup",
+		):
+			return nil, fs.ErrNotExist
+		case strings.Contains(
+			err.Error(),
+			"No message ids were provided",
+		):
+		case strings.Contains(
+			err.Error(),
+			"Invalid message ID provided",
+		):
+			return nil, fs.ErrNotExist
+		}
+
+		return nil, err
+	}
+
+	firstMessage, ok := message.(*telegram.MessagesChannelMessages).
+		Messages[0].(*telegram.MessageObj)
+	if !ok {
+		return nil, fs.ErrNotExist
+	}
+
+	return firstMessage.
+		Media.(*telegram.MessageMediaDocument).
+		Document.(*telegram.DocumentObj), nil
 }
 
 // uploadTGFile uploads the content to the Telegram.
@@ -598,7 +687,7 @@ func (tgs *TGStore) uploadTGFile(
 		}
 	}
 
-	channelAccessHash, err := tgs.tgChannelAccessHash(tgs.ChannelID)
+	channelAccessHash, err := tgs.tgChannelAccessHash(ctx, tgs.ChannelID)
 	if err != nil {
 		return "", err
 	}
@@ -617,7 +706,6 @@ func (tgs *TGStore) uploadTGFile(
 				},
 				MimeType: "application/octet-stream",
 			},
-			Message:  "",
 			RandomID: randomFileID,
 		},
 	)
@@ -625,16 +713,16 @@ func (tgs *TGStore) uploadTGFile(
 		return "", err
 	}
 
-	fileIDBytes := make([]byte, 8)
-	binary.BigEndian.PutUint32(fileIDBytes, uint32(tgs.ChannelID))
+	idBytes := make([]byte, 8)
+	binary.BigEndian.PutUint32(idBytes, uint32(tgs.ChannelID))
 	binary.BigEndian.PutUint32(
-		fileIDBytes[4:],
+		idBytes[4:],
 		uint32(update.(*telegram.UpdatesObj).
 			Updates[0].(*telegram.UpdateMessageID).
 			ID),
 	)
 
-	return base64.RawURLEncoding.EncodeToString(fileIDBytes), nil
+	return base64.RawURLEncoding.EncodeToString(idBytes), nil
 }
 
 // downloadTGFile downloads the file targeted by the id from the Telegram. It
@@ -648,30 +736,7 @@ func (tgs *TGStore) downloadTGFile(
 	offsetChunkCount := offset / tgFileChunkSize
 	offset -= offsetChunkCount * tgFileChunkSize
 
-	fileIDBytes, err := base64.RawURLEncoding.DecodeString(id)
-	if err != nil {
-		return nil, err
-	}
-
-	channelID := int32(binary.BigEndian.Uint32(fileIDBytes[:4]))
-	messageID := int32(binary.BigEndian.Uint32(fileIDBytes[4:]))
-
-	channelAccessHash, err := tgs.tgChannelAccessHash(channelID)
-	if err != nil {
-		return nil, err
-	}
-
-	message, err := tgs.client.ChannelsGetMessages(
-		&telegram.InputChannelObj{
-			ChannelID:  channelID,
-			AccessHash: channelAccessHash,
-		},
-		[]telegram.InputMessage{
-			&telegram.InputMessageID{
-				ID: messageID,
-			},
-		},
-	)
+	document, err := tgs.tgDocument(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -681,11 +746,6 @@ func (tgs *TGStore) downloadTGFile(
 		defer func() {
 			pw.CloseWithError(err)
 		}()
-
-		document := message.(*telegram.MessagesChannelMessages).
-			Messages[0].(*telegram.MessageObj).
-			Media.(*telegram.MessageMediaDocument).
-			Document.(*telegram.DocumentObj)
 
 		fileLocation := &telegram.InputDocumentFileLocation{
 			ID:            document.ID,
@@ -774,58 +834,43 @@ func (tgs *TGStore) downloadTGFile(
 // sizeTGFile sizes the file targeted by the id from the Telegram. It returns
 // `fs.ErrNotExist` if not found.
 func (tgs *TGStore) sizeTGFile(ctx context.Context, id string) (int64, error) {
-	fileIDBytes, err := base64.RawURLEncoding.DecodeString(id)
+	document, err := tgs.tgDocument(ctx, id)
 	if err != nil {
 		return 0, err
 	}
 
-	channelID := int32(binary.BigEndian.Uint32(fileIDBytes[:4]))
-	messageID := int32(binary.BigEndian.Uint32(fileIDBytes[4:]))
-
-	channelAccessHash, err := tgs.tgChannelAccessHash(channelID)
-	if err != nil {
-		return 0, err
+	fullChunkCount := document.Size / tgFileEncryptedChunkSize
+	size := fullChunkCount * tgFileChunkSize
+	if document.Size%tgFileEncryptedChunkSize != 0 {
+		size += document.Size -
+			fullChunkCount*tgFileEncryptedChunkSize -
+			tgFileEncryptedChunkSize +
+			tgFileChunkSize
 	}
 
-	message, err := tgs.client.ChannelsGetMessages(
-		&telegram.InputChannelObj{
-			ChannelID:  channelID,
-			AccessHash: channelAccessHash,
-		},
-		[]telegram.InputMessage{
-			&telegram.InputMessageID{
-				ID: messageID,
-			},
-		},
-	)
-	if err != nil {
-		return 0, err
-	}
-
-	return int64(message.(*telegram.MessagesChannelMessages).
-		Messages[0].(*telegram.MessageObj).
-		Media.(*telegram.MessageMediaDocument).
-		Document.(*telegram.DocumentObj).
-		Size), nil
+	return int64(size), nil
 }
 
 // deleteTGFiles deletes the files targeted by the ids from the Telegram.
 func (tgs *TGStore) deleteTGFiles(ctx context.Context, ids ...string) error {
 	messageIDs := map[int32][]int32{}
 	for _, id := range ids {
-		fileIDBytes, err := base64.RawURLEncoding.DecodeString(id)
+		idBytes, err := base64.RawURLEncoding.DecodeString(id)
 		if err != nil {
 			return err
 		}
 
-		channelID := int32(binary.BigEndian.Uint32(fileIDBytes[:4]))
-		messageID := int32(binary.BigEndian.Uint32(fileIDBytes[4:]))
+		channelID := int32(binary.BigEndian.Uint32(idBytes[:4]))
+		messageID := int32(binary.BigEndian.Uint32(idBytes[4:]))
 
 		messageIDs[channelID] = append(messageIDs[channelID], messageID)
 	}
 
 	for channelID, messageIDs := range messageIDs {
-		channelAccessHash, err := tgs.tgChannelAccessHash(channelID)
+		channelAccessHash, err := tgs.tgChannelAccessHash(
+			ctx,
+			channelID,
+		)
 		if err != nil {
 			return err
 		}
