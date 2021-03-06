@@ -453,6 +453,38 @@ func (tgs *TGStore) Download(
 	return reader, nil
 }
 
+// Delete deletes the object targeted by the id from the cloud.
+//
+// The lenth of the secretKey must be 16.
+func (tgs *TGStore) Delete(
+	ctx context.Context,
+	secretKey []byte,
+	id string,
+) error {
+	reader, err := tgs.Download(ctx, secretKey, id)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+
+		return err
+	} else if err := reader.Close(); err != nil {
+		return err
+	}
+
+	tgs.objectMetadataCache.Delete(id)
+
+	metadata := reader.(*objectReader).metadata
+	switch len(metadata.PartIDs) {
+	case 0:
+		return nil
+	case 1:
+		return tgs.deleteTGFiles(ctx, metadata.PartIDs[0])
+	}
+
+	return tgs.deleteTGFiles(ctx, append(metadata.PartIDs, id[1:])...)
+}
+
 // tgChannelAccessHash returns the access hash of the Telegram channel targeted
 // by the id. It returns `fs.ErrNotExist` if not found.
 func (tgs *TGStore) tgChannelAccessHash(id int32) (int64, error) {
@@ -775,6 +807,41 @@ func (tgs *TGStore) sizeTGFile(ctx context.Context, id string) (int64, error) {
 		Media.(*telegram.MessageMediaDocument).
 		Document.(*telegram.DocumentObj).
 		Size), nil
+}
+
+// deleteTGFiles deletes the files targeted by the ids from the Telegram.
+func (tgs *TGStore) deleteTGFiles(ctx context.Context, ids ...string) error {
+	messageIDs := map[int32][]int32{}
+	for _, id := range ids {
+		fileIDBytes, err := base64.RawURLEncoding.DecodeString(id)
+		if err != nil {
+			return err
+		}
+
+		channelID := int32(binary.BigEndian.Uint32(fileIDBytes[:4]))
+		messageID := int32(binary.BigEndian.Uint32(fileIDBytes[4:]))
+
+		messageIDs[channelID] = append(messageIDs[channelID], messageID)
+	}
+
+	for channelID, messageIDs := range messageIDs {
+		channelAccessHash, err := tgs.tgChannelAccessHash(channelID)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tgs.client.ChannelsDeleteMessages(
+			&telegram.InputChannelObj{
+				ChannelID:  channelID,
+				AccessHash: channelAccessHash,
+			},
+			messageIDs,
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // countReader is used to count the number of bytes read from the underlying

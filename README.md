@@ -13,6 +13,7 @@ Please only upload what you really need to upload, don't abuse any system.
 	* One struct: [`tgstore.TGStore`](https://pkg.go.dev/golang.design/x/tgstore#TGStore)
 		* [`tgstore.TGStore.Upload`](https://pkg.go.dev/golang.design/x/tgstore#TGStore.Upload)
 		* [`tgstore.TGStore.Download`](https://pkg.go.dev/golang.design/x/tgstore#TGStore.Download)
+		* [`tgstore.TGStore.Delete`](https://pkg.go.dev/golang.design/x/tgstore#TGStore.Delete)
 * Unlimited storage space
 * Up to N PiB per object (please never try to find out what N is, you don't need that)
 * Crazy upload and download speed
@@ -73,6 +74,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer tgs.Delete(context.TODO(), objectSecretKey, objectID)
 
 	fmt.Println("Upload time:", time.Since(startTime))
 
