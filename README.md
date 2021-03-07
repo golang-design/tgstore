@@ -101,6 +101,27 @@ func main() {
 	fmt.Println("Read time:", time.Since(startTime))
 
 	fmt.Println("Content:", string(b))
+
+	fmt.Print("Delete in")
+	for i := 5; i > 0; i-- {
+		fmt.Printf(" %ds...", i)
+		time.Sleep(time.Second)
+	}
+
+	startTime = time.Now()
+
+	if err := tgs.Delete(
+		context.TODO(),
+		objectSecretKey,
+		objectID,
+	); err != nil {
+		fmt.Println()
+		log.Fatal(err)
+	}
+
+	fmt.Println(" deleted!")
+
+	fmt.Println("Delete time:", time.Since(startTime))
 }
 ```
 
