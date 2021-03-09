@@ -40,7 +40,7 @@ const (
 	tgFileEncryptedChunkSize = tgFileChunkSize + poly1305.TagSize
 
 	// noContentObjectID is the ID of an object with no content.
-	noContentObjectID = "0AAAAAAAAAAA"
+	noContentObjectID = "0AAAAAAAAAAAAAAAAAAAAAA"
 )
 
 // TGStore is the top-level struct of this project.
@@ -69,7 +69,7 @@ type TGStore struct {
 	// The `AppAPIID` is from https://my.telegram.org/apps.
 	//
 	// Default value: 0
-	AppAPIID int32 `mapstructure:"app_api_id"`
+	AppAPIID int64 `mapstructure:"app_api_id"`
 
 	// AppAPIHash is the Telegram app API hash.
 	//
@@ -94,7 +94,7 @@ type TGStore struct {
 	// already been uploaded are not affected.
 	//
 	// Default value: 0
-	ChannelID int32 `mapstructure:"channel_id"`
+	ChannelID int64 `mapstructure:"channel_id"`
 
 	// MaxObjectMetadataCacheBytes is the maximum number of bytes allowed
 	// for object metadata cache to use.
@@ -135,7 +135,7 @@ func (tgs *TGStore) load() {
 	appDir := filepath.Join(
 		userCacheDir,
 		"tgstore",
-		strconv.FormatInt(int64(tgs.AppAPIID), 10),
+		strconv.FormatInt(tgs.AppAPIID, 10),
 	)
 	if _, err := os.Stat(appDir); err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
@@ -214,7 +214,7 @@ func (tgs *TGStore) load() {
 
 		if _, err := client.AuthImportBotAuthorization(
 			1,
-			tgs.AppAPIID,
+			int32(tgs.AppAPIID),
 			tgs.AppAPIHash,
 			tgs.BotToken,
 		); err != nil {
@@ -261,7 +261,7 @@ func (tgs *TGStore) load() {
 // usually up to 2000 MiB for each upload operation. Therefore, a positive size
 // should be provided if possible.
 //
-// Note that the returned id is URL safe (`^[A-Za-z0-9-_]{12}$`).
+// Note that the returned id is URL safe (`^[A-Za-z0-9-_]{23}$`).
 func (tgs *TGStore) Upload(
 	ctx context.Context,
 	secretKey []byte,
@@ -563,7 +563,7 @@ func (tgs *TGStore) tgChannelAccessHash(
 
 	cs, err := tgs.client.ChannelsGetChannels([]telegram.InputChannel{
 		&telegram.InputChannelObj{
-			ChannelID: tgs.ChannelID,
+			ChannelID: int32(tgs.ChannelID),
 		},
 	})
 	if err != nil {
@@ -609,8 +609,8 @@ func (tgs *TGStore) tgDocument(
 		return nil, err
 	}
 
-	channelID := int32(binary.BigEndian.Uint32(fileIDBytes[:4]))
-	messageID := int32(binary.BigEndian.Uint32(fileIDBytes[4:]))
+	channelID := int32(binary.BigEndian.Uint64(fileIDBytes[:8]))
+	messageID := int32(binary.BigEndian.Uint64(fileIDBytes[8:]))
 
 	channelAccessHash, err := tgs.tgChannelAccessHash(ctx, channelID)
 	if err != nil {
@@ -768,7 +768,10 @@ func (tgs *TGStore) uploadTGFile(
 		}
 	}
 
-	channelAccessHash, err := tgs.tgChannelAccessHash(ctx, tgs.ChannelID)
+	channelAccessHash, err := tgs.tgChannelAccessHash(
+		ctx,
+		int32(tgs.ChannelID),
+	)
 	if err != nil {
 		return "", err
 	}
@@ -777,7 +780,7 @@ func (tgs *TGStore) uploadTGFile(
 		&telegram.MessagesSendMediaParams{
 			Silent: true,
 			Peer: &telegram.InputPeerChannel{
-				ChannelID:  tgs.ChannelID,
+				ChannelID:  int32(tgs.ChannelID),
 				AccessHash: channelAccessHash,
 			},
 			Media: &telegram.InputMediaUploadedDocument{
@@ -794,11 +797,11 @@ func (tgs *TGStore) uploadTGFile(
 		return "", err
 	}
 
-	idBytes := make([]byte, 8)
-	binary.BigEndian.PutUint32(idBytes, uint32(tgs.ChannelID))
-	binary.BigEndian.PutUint32(
-		idBytes[4:],
-		uint32(update.(*telegram.UpdatesObj).
+	idBytes := make([]byte, 16)
+	binary.BigEndian.PutUint64(idBytes[:8], uint64(tgs.ChannelID))
+	binary.BigEndian.PutUint64(
+		idBytes[8:],
+		uint64(update.(*telegram.UpdatesObj).
 			Updates[0].(*telegram.UpdateMessageID).
 			ID),
 	)
@@ -950,8 +953,8 @@ func (tgs *TGStore) deleteTGFiles(ctx context.Context, ids ...string) error {
 			return err
 		}
 
-		channelID := int32(binary.BigEndian.Uint32(idBytes[:4]))
-		messageID := int32(binary.BigEndian.Uint32(idBytes[4:]))
+		channelID := int32(binary.BigEndian.Uint64(idBytes[:8]))
+		messageID := int32(binary.BigEndian.Uint64(idBytes[8:]))
 
 		messageIDs[channelID] = append(messageIDs[channelID], messageID)
 	}
