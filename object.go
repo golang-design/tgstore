@@ -11,9 +11,9 @@ import (
 
 // objectMetadata is the metadata of the object.
 type objectMetadata struct {
-	PartIDs   []string `json:"part_ids"`
-	Size      int64    `json:"size"`
-	SplitSize int64    `json:"split_size,omitempty"`
+	PartIDs  []string `json:"part_ids"`
+	PartSize int64    `json:"part_size"`
+	Size     int64    `json:"size"`
 }
 
 // objectReader is the reader of the object.
@@ -40,56 +40,47 @@ func (or *objectReader) Read(b []byte) (int, error) {
 	}
 
 	if or.readCloser == nil {
-		var offsetPartCount int64
-		if or.metadata.SplitSize > 0 {
-			offsetPartCount = or.offset / or.metadata.SplitSize
-		}
+		offsetPartCount := or.offset / or.metadata.PartSize
+		offset := or.offset - offsetPartCount*or.metadata.PartSize
 
-		offset := or.offset - offsetPartCount*or.metadata.SplitSize
-
-		partIDs := or.metadata.PartIDs[offsetPartCount:]
-		if len(partIDs) == 1 {
-			var err error
-			if or.readCloser, err = or.tgs.downloadTGFile(
-				or.ctx,
-				or.aead,
-				or.metadata.PartIDs[0],
-				offset,
-			); err != nil {
-				return 0, err
-			}
-		} else {
-			pr, pw := io.Pipe()
-			go func() (err error) {
-				defer func() {
-					pw.CloseWithError(err)
-				}()
-
-				for _, partID := range partIDs {
-					prc, err := or.tgs.downloadTGFile(
-						or.ctx,
-						or.aead,
-						partID,
-						offset,
-					)
-					if err != nil {
-						return err
-					}
-
-					offset = 0
-
-					_, err = io.Copy(pw, prc)
-					prc.Close()
-					if err != nil {
-						return err
-					}
-				}
-
-				return nil
+		pr, pw := io.Pipe()
+		go func() (err error) {
+			defer func() {
+				pw.CloseWithError(err)
 			}()
 
-			or.readCloser = pr
-		}
+			nonceCounter := uint64(offsetPartCount*
+				or.metadata.PartSize/
+				tgFileChunkSize +
+				1)
+
+			partIDs := or.metadata.PartIDs[offsetPartCount:]
+			for _, partID := range partIDs {
+				prc, err := or.tgs.downloadTGFile(
+					or.ctx,
+					or.aead,
+					0,
+					&nonceCounter,
+					partID,
+					offset,
+				)
+				if err != nil {
+					return err
+				}
+
+				offset = 0
+
+				_, err = io.Copy(pw, prc)
+				prc.Close()
+				if err != nil {
+					return err
+				}
+			}
+
+			return nil
+		}()
+
+		or.readCloser = pr
 	}
 
 	n, err := or.readCloser.Read(b)

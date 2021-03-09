@@ -54,14 +54,7 @@ const (
 type TGStore struct {
 	// MTProtoServerHost is the MTProto server host.
 	//
-	// Available values:
-	//   * 149.154.175.58:443 (Miami Florida, United States)
-	//   * 149.154.167.50:443 (Amsterdam North Holland, Netherlands)
-	//   * 149.154.175.100:443 (Miami Florida, United States)
-	//   * 149.154.167.91:443 (Amsterdam North Holland, Netherlands)
-	//   * 91.108.56.151:443 (Singapore, Singapore)
-	//
-	// Default value: "149.154.175.58:443"
+	// Default value: ""
 	MTProtoServerHost string `mapstructure:"mtproto_server_host"`
 
 	// MTProtoPublicKeys is the MTProto public keys.
@@ -124,7 +117,6 @@ type TGStore struct {
 // and keeps everything working.
 func New() *TGStore {
 	return &TGStore{
-		MTProtoServerHost:           "149.154.175.58:443",
 		MaxObjectMetadataCacheBytes: 64 << 20,
 	}
 }
@@ -270,10 +262,6 @@ func (tgs *TGStore) Upload(
 	secretKey []byte,
 	content io.Reader,
 ) (string, error) {
-	const splitSize = 4000 * 512 * 1024 /
-		tgFileEncryptedChunkSize *
-		tgFileChunkSize
-
 	tgs.loadOnce.Do(tgs.load)
 	if tgs.loadError != nil {
 		return "", tgs.loadError
@@ -288,8 +276,13 @@ func (tgs *TGStore) Upload(
 		return noContentObjectID, nil
 	}
 
-	metadata := objectMetadata{}
-	for buf := bytes.NewBuffer(nil); ; {
+	metadata := objectMetadata{
+		PartSize: 4000 * 512 * 1024 /
+			tgFileEncryptedChunkSize *
+			tgFileChunkSize,
+	}
+
+	for buf, nonceCounter := bytes.NewBuffer(nil), uint64(1); ; {
 		if _, err := io.CopyN(buf, content, 1); err != nil {
 			if errors.Is(err, io.EOF) {
 				break
@@ -301,11 +294,17 @@ func (tgs *TGStore) Upload(
 		part := &countReader{
 			r: io.LimitReader(
 				io.MultiReader(buf, content),
-				splitSize,
+				metadata.PartSize,
 			),
 		}
 
-		tgfID, err := tgs.uploadTGFile(ctx, aead, part)
+		tgfID, err := tgs.uploadTGFile(
+			ctx,
+			aead,
+			0,
+			&nonceCounter,
+			part,
+		)
 		if err != nil {
 			return "", err
 		}
@@ -318,6 +317,8 @@ func (tgs *TGStore) Upload(
 	case 0:
 		return noContentObjectID, nil
 	case 1:
+		metadata.PartSize = metadata.Size
+
 		metadataJSON, err := json.Marshal(metadata)
 		if err != nil {
 			return "", err
@@ -328,8 +329,6 @@ func (tgs *TGStore) Upload(
 
 		return id, nil
 	}
-
-	metadata.SplitSize = splitSize
 
 	metadataJSON, err := json.Marshal(metadata)
 	if err != nil {
@@ -351,7 +350,7 @@ func (tgs *TGStore) Upload(
 		return "", err
 	}
 
-	tgfID, err := tgs.uploadTGFile(ctx, aead, &gzippedMetadataJSON)
+	tgfID, err := tgs.uploadTGFile(ctx, aead, 1, nil, &gzippedMetadataJSON)
 	if err != nil {
 		return "", err
 	}
@@ -415,6 +414,8 @@ func (tgs *TGStore) Download(
 			return nil, err
 		}
 
+		reader.metadata.PartSize = reader.metadata.Size
+
 		metadataJSON, err := json.Marshal(reader.metadata)
 		if err != nil {
 			return nil, err
@@ -422,7 +423,7 @@ func (tgs *TGStore) Download(
 
 		tgs.objectMetadataCache.Set(id, metadataJSON)
 	case '1':
-		tgfrc, err := tgs.downloadTGFile(ctx, aead, id[1:], 0)
+		tgfrc, err := tgs.downloadTGFile(ctx, aead, 1, nil, id[1:], 0)
 		if err != nil {
 			return nil, err
 		}
@@ -604,6 +605,8 @@ func (tgs *TGStore) tgDocument(
 func (tgs *TGStore) uploadTGFile(
 	ctx context.Context,
 	aead cipher.AEAD,
+	noncePrefix uint32,
+	nonceCounter *uint64,
 	content io.Reader,
 ) (string, error) {
 	pr, pw := io.Pipe()
@@ -619,7 +622,13 @@ func (tgs *TGStore) uploadTGFile(
 			nonce = make([]byte, chacha20poly1305.NonceSize)
 		)
 
-		for counter := uint64(1); ; counter++ {
+		binary.LittleEndian.PutUint32(nonce[:4], noncePrefix)
+		if nonceCounter == nil {
+			nonceCounter = new(uint64)
+			*nonceCounter = 1
+		}
+
+		for ; ; *nonceCounter++ {
 			n, err := io.ReadFull(
 				content,
 				buf[:tgFileChunkSize],
@@ -632,7 +641,7 @@ func (tgs *TGStore) uploadTGFile(
 				}
 			}
 
-			binary.LittleEndian.PutUint64(nonce[4:], counter)
+			binary.LittleEndian.PutUint64(nonce[4:], *nonceCounter)
 
 			if _, err := pw.Write(aead.Seal(
 				buf[:0],
@@ -730,6 +739,8 @@ func (tgs *TGStore) uploadTGFile(
 func (tgs *TGStore) downloadTGFile(
 	ctx context.Context,
 	aead cipher.AEAD,
+	noncePrefix uint32,
+	nonceCounter *uint64,
 	id string,
 	offset int64,
 ) (io.ReadCloser, error) {
@@ -794,7 +805,14 @@ func (tgs *TGStore) downloadTGFile(
 			nonce = make([]byte, chacha20poly1305.NonceSize)
 		)
 
-		for counter := uint64(offsetChunkCount + 1); ; counter++ {
+		binary.LittleEndian.PutUint32(nonce[:4], noncePrefix)
+		if nonceCounter == nil {
+			nonceCounter = new(uint64)
+			*nonceCounter = 1
+		}
+
+		*nonceCounter += uint64(offsetChunkCount)
+		for ; ; *nonceCounter++ {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -808,7 +826,7 @@ func (tgs *TGStore) downloadTGFile(
 				}
 			}
 
-			binary.LittleEndian.PutUint64(nonce[4:], counter)
+			binary.LittleEndian.PutUint64(nonce[4:], *nonceCounter)
 
 			chunk, err := aead.Open(buf[:0], nonce, buf[:n], nil)
 			if err != nil {
