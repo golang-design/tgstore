@@ -64,12 +64,15 @@ func main() {
 		log.Fatal(err)
 	}
 
+	objectContent := strings.NewReader("Hello, 世界")
+
 	startTime := time.Now()
 
 	objectID, err := tgs.Upload(
 		context.TODO(),
 		objectSecretKey,
-		strings.NewReader("Hello, 世界"),
+		objectContent,
+		objectContent.Size(),
 	)
 	if err != nil {
 		log.Fatal(err)

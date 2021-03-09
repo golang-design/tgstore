@@ -256,11 +256,17 @@ func (tgs *TGStore) load() {
 //
 // The lenth of the secretKey must be 16.
 //
+// If the size < 0, the `Upload` will read from the content until it reaches an
+// `io.EOF`. But it should be noted that this will take up the local disk space,
+// usually up to 2000 MiB for each upload operation. Therefore, a positive size
+// should be provided if possible.
+//
 // Note that the returned id is URL safe (`^[A-Za-z0-9-_]{12}$`).
 func (tgs *TGStore) Upload(
 	ctx context.Context,
 	secretKey []byte,
 	content io.Reader,
+	size int64,
 ) (string, error) {
 	tgs.loadOnce.Do(tgs.load)
 	if tgs.loadError != nil {
@@ -272,7 +278,7 @@ func (tgs *TGStore) Upload(
 		return "", err
 	}
 
-	if content == nil {
+	if content == nil || size == 0 {
 		return noContentObjectID, nil
 	}
 
@@ -282,35 +288,86 @@ func (tgs *TGStore) Upload(
 			tgFileChunkSize,
 	}
 
-	for buf, nonceCounter := bytes.NewBuffer(nil), uint64(1); ; {
-		if _, err := io.CopyN(buf, content, 1); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
+	if nonceCounter := uint64(1); size > 0 {
+		partSize := metadata.PartSize
+		for remainingSize := size; remainingSize > 0; {
+			if remainingSize < partSize {
+				partSize = remainingSize
 			}
 
-			return "", err
-		}
+			tgfID, err := tgs.uploadTGFile(
+				ctx,
+				aead,
+				0,
+				&nonceCounter,
+				io.LimitReader(content, partSize),
+				partSize,
+			)
+			if err != nil {
+				return "", err
+			}
 
-		part := &countReader{
-			r: io.LimitReader(
-				io.MultiReader(buf, content),
-				metadata.PartSize,
-			),
-		}
+			metadata.PartIDs = append(metadata.PartIDs, tgfID)
+			metadata.Size += partSize
 
-		tgfID, err := tgs.uploadTGFile(
-			ctx,
-			aead,
-			0,
-			&nonceCounter,
-			part,
-		)
+			remainingSize -= partSize
+		}
+	} else {
+		partFile, err := os.CreateTemp("", "tgstore-object-part")
 		if err != nil {
 			return "", err
 		}
+		defer os.Remove(partFile.Name())
 
-		metadata.PartIDs = append(metadata.PartIDs, tgfID)
-		metadata.Size += part.c
+		for buf := bytes.NewBuffer(nil); ; {
+			if _, err := io.CopyN(buf, content, 1); err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+
+				return "", err
+			}
+
+			if _, err := partFile.Seek(
+				0,
+				io.SeekStart,
+			); err != nil {
+				return "", err
+			}
+
+			n, err := io.Copy(
+				partFile,
+				io.LimitReader(
+					io.MultiReader(buf, content),
+					metadata.PartSize,
+				),
+			)
+			if err != nil {
+				return "", err
+			}
+
+			if _, err := partFile.Seek(
+				0,
+				io.SeekStart,
+			); err != nil {
+				return "", err
+			}
+
+			tgfID, err := tgs.uploadTGFile(
+				ctx,
+				aead,
+				0,
+				&nonceCounter,
+				partFile,
+				n,
+			)
+			if err != nil {
+				return "", err
+			}
+
+			metadata.PartIDs = append(metadata.PartIDs, tgfID)
+			metadata.Size += n
+		}
 	}
 
 	switch len(metadata.PartIDs) {
@@ -350,7 +407,14 @@ func (tgs *TGStore) Upload(
 		return "", err
 	}
 
-	tgfID, err := tgs.uploadTGFile(ctx, aead, 1, nil, &gzippedMetadataJSON)
+	tgfID, err := tgs.uploadTGFile(
+		ctx,
+		aead,
+		1,
+		nil,
+		&gzippedMetadataJSON,
+		int64(gzippedMetadataJSON.Len()),
+	)
 	if err != nil {
 		return "", err
 	}
@@ -608,7 +672,10 @@ func (tgs *TGStore) uploadTGFile(
 	noncePrefix uint32,
 	nonceCounter *uint64,
 	content io.Reader,
+	size int64,
 ) (string, error) {
+	const partSize = 512 << 10
+
 	pr, pw := io.Pipe()
 	defer pr.Close()
 
@@ -656,6 +723,15 @@ func (tgs *TGStore) uploadTGFile(
 		return nil
 	}()
 
+	fullChunkCount := size / tgFileChunkSize
+	encryptedSize := fullChunkCount * tgFileEncryptedChunkSize
+	if size%tgFileChunkSize != 0 {
+		encryptedSize += size -
+			fullChunkCount*tgFileChunkSize -
+			tgFileChunkSize +
+			tgFileEncryptedChunkSize
+	}
+
 	randomFileIDBytes := make([]byte, 8)
 	if _, err := rand.Read(randomFileIDBytes); err != nil {
 		return "", err
@@ -663,12 +739,12 @@ func (tgs *TGStore) uploadTGFile(
 
 	randomFileID := int64(binary.BigEndian.Uint64(randomFileIDBytes))
 
-	var (
-		partCount int32
-		buf       = make([]byte, 512<<10)
-	)
+	partCount := int32(encryptedSize / partSize)
+	if encryptedSize%partSize != 0 {
+		partCount++
+	}
 
-	for totalParts := int32(4000); ; partCount++ {
+	for i, buf := int32(0), make([]byte, partSize); i < partCount; i++ {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
@@ -682,14 +758,10 @@ func (tgs *TGStore) uploadTGFile(
 			}
 		}
 
-		if partCount == 0 && n < 512<<10 {
-			totalParts = 1
-		}
-
 		if _, err := tgs.client.UploadSaveBigFilePart(
 			randomFileID,
+			i,
 			partCount,
-			totalParts,
 			buf[:n],
 		); err != nil {
 			return "", err
@@ -905,18 +977,4 @@ func (tgs *TGStore) deleteTGFiles(ctx context.Context, ids ...string) error {
 	}
 
 	return nil
-}
-
-// countReader is used to count the number of bytes read from the underlying
-// `io.Reader`.
-type countReader struct {
-	r io.Reader
-	c int64
-}
-
-// Read implements the `io.Reader`.
-func (cr *countReader) Read(b []byte) (int, error) {
-	n, err := cr.r.Read(b)
-	cr.c += int64(n)
-	return n, err
 }
