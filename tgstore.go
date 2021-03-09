@@ -282,6 +282,16 @@ func (tgs *TGStore) Upload(
 		return noContentObjectID, nil
 	}
 
+	var tgTempFileIDs []string
+	defer func() {
+		if len(tgTempFileIDs) > 0 {
+			tgs.deleteTGFiles(
+				context.Background(),
+				tgTempFileIDs...,
+			)
+		}
+	}()
+
 	metadata := objectMetadata{
 		PartSize: 4000 * 512 * 1024 /
 			tgFileEncryptedChunkSize *
@@ -306,6 +316,8 @@ func (tgs *TGStore) Upload(
 			if err != nil {
 				return "", err
 			}
+
+			tgTempFileIDs = append(tgTempFileIDs, tgfID)
 
 			metadata.PartIDs = append(metadata.PartIDs, tgfID)
 			metadata.Size += partSize
@@ -365,6 +377,8 @@ func (tgs *TGStore) Upload(
 				return "", err
 			}
 
+			tgTempFileIDs = append(tgTempFileIDs, tgfID)
+
 			metadata.PartIDs = append(metadata.PartIDs, tgfID)
 			metadata.Size += n
 		}
@@ -418,6 +432,8 @@ func (tgs *TGStore) Upload(
 	if err != nil {
 		return "", err
 	}
+
+	tgTempFileIDs = nil
 
 	id := fmt.Sprint("1", tgfID)
 	tgs.objectMetadataCache.Set(id, metadataJSON)
