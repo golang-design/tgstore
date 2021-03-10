@@ -384,6 +384,7 @@ func (tgs *TGStore) Upload(
 		}
 	}
 
+	var id string
 	switch len(metadata.PartIDs) {
 	case 0:
 		return noContentObjectID, nil
@@ -395,48 +396,48 @@ func (tgs *TGStore) Upload(
 			return "", err
 		}
 
-		id := fmt.Sprint("0", metadata.PartIDs[0])
+		id = fmt.Sprint("0", metadata.PartIDs[0])
 		tgs.objectMetadataCache.Set(id, metadataJSON)
+	default:
+		metadataJSON, err := json.Marshal(metadata)
+		if err != nil {
+			return "", err
+		}
 
-		return id, nil
-	}
+		gzippedMetadataJSON := bytes.Buffer{}
+		if gw, err := gzip.NewWriterLevel(
+			&gzippedMetadataJSON,
+			gzip.BestCompression,
+		); err != nil {
+			return "", err
+		} else if _, err := io.Copy(
+			gw,
+			bytes.NewReader(metadataJSON),
+		); err != nil {
+			return "", err
+		} else if err := gw.Close(); err != nil {
+			return "", err
+		}
 
-	metadataJSON, err := json.Marshal(metadata)
-	if err != nil {
-		return "", err
-	}
+		tgfID, err := tgs.uploadTGFile(
+			ctx,
+			aead,
+			1,
+			nil,
+			&gzippedMetadataJSON,
+			int64(gzippedMetadataJSON.Len()),
+		)
+		if err != nil {
+			return "", err
+		}
 
-	gzippedMetadataJSON := bytes.Buffer{}
-	if gw, err := gzip.NewWriterLevel(
-		&gzippedMetadataJSON,
-		gzip.BestCompression,
-	); err != nil {
-		return "", err
-	} else if _, err := io.Copy(
-		gw,
-		bytes.NewReader(metadataJSON),
-	); err != nil {
-		return "", err
-	} else if err := gw.Close(); err != nil {
-		return "", err
-	}
+		tgTempFileIDs = append(tgTempFileIDs, tgfID)
 
-	tgfID, err := tgs.uploadTGFile(
-		ctx,
-		aead,
-		1,
-		nil,
-		&gzippedMetadataJSON,
-		int64(gzippedMetadataJSON.Len()),
-	)
-	if err != nil {
-		return "", err
+		id = fmt.Sprint("1", tgfID)
+		tgs.objectMetadataCache.Set(id, metadataJSON)
 	}
 
 	tgTempFileIDs = nil
-
-	id := fmt.Sprint("1", tgfID)
-	tgs.objectMetadataCache.Set(id, metadataJSON)
 
 	return id, nil
 }
