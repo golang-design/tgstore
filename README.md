@@ -52,7 +52,7 @@ import (
 
 func main() {
 	tgs := tgstore.New()
-	tgs.MTProtoServerHost = "91.108.56.151:443" // Choose the one closest to you
+	tgs.MTProtoEndpoint = "tcp://91.108.56.151:443"
 	tgs.MTProtoPublicKeys = "<your-mtproto-public-keys>"
 	tgs.AppAPIID = 1234567890
 	tgs.AppAPIHash = "<your-telegram-app-api-hash>"

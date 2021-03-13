@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -52,10 +53,13 @@ const (
 // The new instances of the `TGStore` should only be created by calling the
 // `New`.
 type TGStore struct {
-	// MTProtoServerHost is the MTProto server host.
+	// MTProtoEndpoint is the MTProto endpoint.
+	//
+	// Supported formats:
+	//   * tcp://<host>:<port>
 	//
 	// Default value: ""
-	MTProtoServerHost string `mapstructure:"mtproto_server_host"`
+	MTProtoEndpoint string `mapstructure:"mtproto_endpoint"`
 
 	// MTProtoPublicKeys is the MTProto public keys.
 	//
@@ -155,8 +159,20 @@ func (tgs *TGStore) load() {
 		}
 	}
 
-	publicKeysFile := filepath.Join(appDir, "public_keys.pem")
-	if _, err := os.Stat(publicKeysFile); err != nil {
+	clientConfig := telegram.ClientConfig{
+		SessionFile: filepath.Join(
+			appDir,
+			fmt.Sprintf(
+				"%x-session.json",
+				sha256.Sum256([]byte(tgs.BotToken)),
+			),
+		),
+		PublicKeysFile: filepath.Join(appDir, "public_keys.pem"),
+		AppID:          int(tgs.AppAPIID),
+		AppHash:        tgs.AppAPIHash,
+	}
+
+	if _, err := os.Stat(clientConfig.PublicKeysFile); err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			tgs.loadError = fmt.Errorf(
 				"failed to stat mtproto public keys file: %v",
@@ -166,7 +182,7 @@ func (tgs *TGStore) load() {
 		}
 
 		if err := os.WriteFile(
-			publicKeysFile,
+			clientConfig.PublicKeysFile,
 			[]byte(tgs.MTProtoPublicKeys),
 			0666,
 		); err != nil {
@@ -178,21 +194,27 @@ func (tgs *TGStore) load() {
 		}
 	}
 
-	sessionFile := filepath.Join(
-		appDir,
-		fmt.Sprintf(
-			"%x-session.json",
-			sha256.Sum256([]byte(tgs.BotToken)),
-		),
-	)
+	endpoint, err := url.Parse(tgs.MTProtoEndpoint)
+	if err != nil {
+		tgs.loadError = fmt.Errorf(
+			"failed to parse mtproto endpoint: %v",
+			err,
+		)
+		return
+	}
 
-	client, err := telegram.NewClient(telegram.ClientConfig{
-		SessionFile:    sessionFile,
-		ServerHost:     tgs.MTProtoServerHost,
-		PublicKeysFile: publicKeysFile,
-		AppID:          int(tgs.AppAPIID),
-		AppHash:        tgs.AppAPIHash,
-	})
+	switch strings.ToLower(endpoint.Scheme) {
+	case "tcp":
+		clientConfig.ServerHost = endpoint.Host
+	default:
+		tgs.loadError = fmt.Errorf(
+			"unsupported mtproto endpoint scheme: %v",
+			err,
+		)
+		return
+	}
+
+	client, err := telegram.NewClient(clientConfig)
 	if err != nil {
 		tgs.loadError = fmt.Errorf(
 			"failed to create telegram client: %v",
@@ -203,7 +225,7 @@ func (tgs *TGStore) load() {
 
 	tgs.client = client
 
-	if _, err := os.Stat(sessionFile); err != nil {
+	if _, err := os.Stat(clientConfig.SessionFile); err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			tgs.loadError = fmt.Errorf(
 				"failed to stat mtproto session file: %v",
