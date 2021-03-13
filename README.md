@@ -56,7 +56,7 @@ func main() {
 	tgs.MTProtoPublicKeys = "<your-mtproto-public-keys>"
 	tgs.AppAPIID = 1234567890
 	tgs.AppAPIHash = "<your-telegram-app-api-hash>"
-	tgs.BotToken = "<your-telegram-bot-token>"
+	tgs.BotTokens = []string{"<your-telegram-bot-token>"}
 	tgs.ChannelID = 1234567890
 
 	objectSecretKey := make([]byte, chacha20poly1305.KeySize)

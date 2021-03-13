@@ -82,14 +82,14 @@ type TGStore struct {
 	// Default value: ""
 	AppAPIHash string `mapstructure:"app_api_hash"`
 
-	// BotToken is the Telegram bot token.
+	// BotTokens is the Telegram bot tokens.
 	//
-	// The Telegram bot targeted by the `BotToken` must have at least
+	// The Telegram bots targeted by the `BotTokens` must have at least
 	// "Post Messages" permission in the channel targeted by the `ChannelID`
 	// to upload objects.
 	//
-	// Default value: ""
-	BotToken string `mapstructure:"bot_token"`
+	// Default value: nil
+	BotTokens []string `mapstructure:"bot_tokens"`
 
 	// ChannelID is the ID of the Telegram channel used to store the objects
 	// to be uploaded.
@@ -110,8 +110,8 @@ type TGStore struct {
 
 	loadOnce            sync.Once
 	loadError           error
-	client              *telegram.Client
-	channelAccessHashes sync.Map
+	client              func() *telegram.Client
+	channelAccessHashes map[*telegram.Client]*sync.Map
 	objectMetadataCache *bigcache.BigCache
 }
 
@@ -122,11 +122,37 @@ type TGStore struct {
 func New() *TGStore {
 	return &TGStore{
 		MaxObjectMetadataCacheBytes: 64 << 20,
+		channelAccessHashes:         map[*telegram.Client]*sync.Map{},
 	}
 }
 
 // load loads the stuff of the tgs up.
 func (tgs *TGStore) load() {
+	clientConfig := telegram.ClientConfig{
+		AppID:   int(tgs.AppAPIID),
+		AppHash: tgs.AppAPIHash,
+	}
+
+	endpoint, err := url.Parse(tgs.MTProtoEndpoint)
+	if err != nil {
+		tgs.loadError = fmt.Errorf(
+			"failed to parse mtproto endpoint: %v",
+			err,
+		)
+		return
+	}
+
+	switch strings.ToLower(endpoint.Scheme) {
+	case "tcp":
+		clientConfig.ServerHost = endpoint.Host
+	default:
+		tgs.loadError = fmt.Errorf(
+			"unsupported mtproto endpoint scheme: %v",
+			err,
+		)
+		return
+	}
+
 	userCacheDir, err := os.UserCacheDir()
 	if err != nil {
 		tgs.loadError = fmt.Errorf(
@@ -159,19 +185,7 @@ func (tgs *TGStore) load() {
 		}
 	}
 
-	clientConfig := telegram.ClientConfig{
-		SessionFile: filepath.Join(
-			appDir,
-			fmt.Sprintf(
-				"%x-session.json",
-				sha256.Sum256([]byte(tgs.BotToken)),
-			),
-		),
-		PublicKeysFile: filepath.Join(appDir, "public_keys.pem"),
-		AppID:          int(tgs.AppAPIID),
-		AppHash:        tgs.AppAPIHash,
-	}
-
+	clientConfig.PublicKeysFile = filepath.Join(appDir, "public_keys.pem")
 	if _, err := os.Stat(clientConfig.PublicKeysFile); err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			tgs.loadError = fmt.Errorf(
@@ -194,58 +208,73 @@ func (tgs *TGStore) load() {
 		}
 	}
 
-	endpoint, err := url.Parse(tgs.MTProtoEndpoint)
-	if err != nil {
-		tgs.loadError = fmt.Errorf(
-			"failed to parse mtproto endpoint: %v",
-			err,
-		)
+	if len(tgs.BotTokens) == 0 {
+		tgs.loadError = errors.New("at least one bot token is required")
 		return
 	}
 
-	switch strings.ToLower(endpoint.Scheme) {
-	case "tcp":
-		clientConfig.ServerHost = endpoint.Host
-	default:
-		tgs.loadError = fmt.Errorf(
-			"unsupported mtproto endpoint scheme: %v",
-			err,
+	clients := make([]*telegram.Client, 0, len(tgs.BotTokens))
+	for _, botToken := range tgs.BotTokens {
+		clientConfig.SessionFile = filepath.Join(
+			appDir,
+			fmt.Sprintf(
+				"%x-session.json",
+				sha256.Sum256([]byte(botToken)),
+			),
 		)
-		return
-	}
 
-	client, err := telegram.NewClient(clientConfig)
-	if err != nil {
-		tgs.loadError = fmt.Errorf(
-			"failed to create telegram client: %v",
-			err,
-		)
-		return
-	}
-
-	tgs.client = client
-
-	if _, err := os.Stat(clientConfig.SessionFile); err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
+		client, err := telegram.NewClient(clientConfig)
+		if err != nil {
 			tgs.loadError = fmt.Errorf(
-				"failed to stat mtproto session file: %v",
+				"failed to create telegram client: %v",
 				err,
 			)
 			return
 		}
 
-		if _, err := client.AuthImportBotAuthorization(
-			1,
-			int32(tgs.AppAPIID),
-			tgs.AppAPIHash,
-			tgs.BotToken,
-		); err != nil {
-			tgs.loadError = fmt.Errorf(
-				"failed to auth telegram bot: %v",
-				err,
-			)
-			return
+		if _, err := os.Stat(clientConfig.SessionFile); err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				tgs.loadError = fmt.Errorf(
+					"failed to stat mtproto session file: "+
+						"%v",
+					err,
+				)
+				return
+			}
+
+			if _, err := client.AuthImportBotAuthorization(
+				1,
+				int32(tgs.AppAPIID),
+				tgs.AppAPIHash,
+				botToken,
+			); err != nil {
+				tgs.loadError = fmt.Errorf(
+					"failed to auth telegram bot: %v",
+					err,
+				)
+				return
+			}
 		}
+
+		clients = append(clients, client)
+
+		tgs.channelAccessHashes[client] = &sync.Map{}
+	}
+
+	clientMutex := sync.Mutex{}
+	clientCursor := 0
+	tgs.client = func() *telegram.Client {
+		clientMutex.Lock()
+		defer clientMutex.Unlock()
+
+		client := clients[clientCursor]
+		if clientCursor < len(clients)-1 {
+			clientCursor++
+		} else {
+			clientCursor = 0
+		}
+
+		return client
 	}
 
 	if tgs.MaxObjectMetadataCacheBytes < 1<<20 {
@@ -594,13 +623,14 @@ func (tgs *TGStore) Delete(
 // by the id. It returns `fs.ErrNotExist` if not found.
 func (tgs *TGStore) tgChannelAccessHash(
 	ctx context.Context,
+	client *telegram.Client,
 	id int32,
 ) (int64, error) {
-	if ahi, ok := tgs.channelAccessHashes.Load(id); ok {
+	if ahi, ok := tgs.channelAccessHashes[client].Load(id); ok {
 		return ahi.(int64), nil
 	}
 
-	cs, err := tgs.client.ChannelsGetChannels([]telegram.InputChannel{
+	cs, err := client.ChannelsGetChannels([]telegram.InputChannel{
 		&telegram.InputChannelObj{
 			ChannelID: int32(tgs.ChannelID),
 		},
@@ -632,7 +662,7 @@ func (tgs *TGStore) tgChannelAccessHash(
 		return 0, fs.ErrNotExist
 	}
 
-	tgs.channelAccessHashes.Store(id, c.AccessHash)
+	tgs.channelAccessHashes[client].Store(id, c.AccessHash)
 
 	return c.AccessHash, nil
 }
@@ -641,6 +671,7 @@ func (tgs *TGStore) tgChannelAccessHash(
 // returns `fs.ErrNotExist` if not found.
 func (tgs *TGStore) tgDocument(
 	ctx context.Context,
+	client *telegram.Client,
 	fileID string,
 ) (*telegram.DocumentObj, error) {
 	fileIDBytes, err := base64.RawURLEncoding.DecodeString(fileID)
@@ -651,12 +682,16 @@ func (tgs *TGStore) tgDocument(
 	channelID := int32(binary.BigEndian.Uint64(fileIDBytes[:8]))
 	messageID := int32(binary.BigEndian.Uint64(fileIDBytes[8:]))
 
-	channelAccessHash, err := tgs.tgChannelAccessHash(ctx, channelID)
+	channelAccessHash, err := tgs.tgChannelAccessHash(
+		ctx,
+		client,
+		channelID,
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	message, err := tgs.client.ChannelsGetMessages(
+	message, err := client.ChannelsGetMessages(
 		&telegram.InputChannelObj{
 			ChannelID:  channelID,
 			AccessHash: channelAccessHash,
@@ -783,6 +818,7 @@ func (tgs *TGStore) uploadTGFile(
 		partCount++
 	}
 
+	client := tgs.client()
 	for i, buf := int32(0), make([]byte, partSize); i < partCount; i++ {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
@@ -797,7 +833,7 @@ func (tgs *TGStore) uploadTGFile(
 			}
 		}
 
-		if _, err := tgs.client.UploadSaveBigFilePart(
+		if _, err := client.UploadSaveBigFilePart(
 			randomFileID,
 			i,
 			partCount,
@@ -809,13 +845,14 @@ func (tgs *TGStore) uploadTGFile(
 
 	channelAccessHash, err := tgs.tgChannelAccessHash(
 		ctx,
+		client,
 		int32(tgs.ChannelID),
 	)
 	if err != nil {
 		return "", err
 	}
 
-	update, err := tgs.client.MessagesSendMedia(
+	update, err := client.MessagesSendMedia(
 		&telegram.MessagesSendMediaParams{
 			Silent: true,
 			Peer: &telegram.InputPeerChannel{
@@ -861,16 +898,18 @@ func (tgs *TGStore) downloadTGFile(
 	offsetChunkCount := offset / tgFileChunkSize
 	offset -= offsetChunkCount * tgFileChunkSize
 
-	document, err := tgs.tgDocument(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-
 	pr, pw := io.Pipe()
 	go func() (err error) {
 		defer func() {
 			pw.CloseWithError(err)
 		}()
+
+		client := tgs.client()
+
+		document, err := tgs.tgDocument(ctx, client, id)
+		if err != nil {
+			return err
+		}
 
 		fileLocation := &telegram.InputDocumentFileLocation{
 			ID:            document.ID,
@@ -884,7 +923,7 @@ func (tgs *TGStore) downloadTGFile(
 				return ctx.Err()
 			}
 
-			file, err := tgs.client.UploadGetFile(
+			file, err := client.UploadGetFile(
 				&telegram.UploadGetFileParams{
 					Precise:  true,
 					Location: fileLocation,
@@ -966,7 +1005,7 @@ func (tgs *TGStore) downloadTGFile(
 // sizeTGFile sizes the file targeted by the id from the Telegram. It returns
 // `fs.ErrNotExist` if not found.
 func (tgs *TGStore) sizeTGFile(ctx context.Context, id string) (int64, error) {
-	document, err := tgs.tgDocument(ctx, id)
+	document, err := tgs.tgDocument(ctx, tgs.client(), id)
 	if err != nil {
 		return 0, err
 	}
@@ -998,16 +1037,18 @@ func (tgs *TGStore) deleteTGFiles(ctx context.Context, ids ...string) error {
 		messageIDs[channelID] = append(messageIDs[channelID], messageID)
 	}
 
+	client := tgs.client()
 	for channelID, messageIDs := range messageIDs {
 		channelAccessHash, err := tgs.tgChannelAccessHash(
 			ctx,
+			client,
 			channelID,
 		)
 		if err != nil {
 			return err
 		}
 
-		if _, err := tgs.client.ChannelsDeleteMessages(
+		if _, err := client.ChannelsDeleteMessages(
 			&telegram.InputChannelObj{
 				ChannelID:  channelID,
 				AccessHash: channelAccessHash,
