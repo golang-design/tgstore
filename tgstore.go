@@ -232,28 +232,17 @@ func (tgs *TGStore) load() {
 			return
 		}
 
-		if _, err := os.Stat(clientConfig.SessionFile); err != nil {
-			if !errors.Is(err, fs.ErrNotExist) {
-				tgs.loadError = fmt.Errorf(
-					"failed to stat mtproto session file: "+
-						"%v",
-					err,
-				)
-				return
-			}
-
-			if _, err := client.AuthImportBotAuthorization(
-				1,
-				int32(tgs.AppAPIID),
-				tgs.AppAPIHash,
-				botToken,
-			); err != nil {
-				tgs.loadError = fmt.Errorf(
-					"failed to auth telegram bot: %v",
-					err,
-				)
-				return
-			}
+		if _, err := client.AuthImportBotAuthorization(
+			1,
+			int32(tgs.AppAPIID),
+			tgs.AppAPIHash,
+			botToken,
+		); err != nil {
+			tgs.loadError = fmt.Errorf(
+				"failed to auth telegram bot: %v",
+				err,
+			)
+			return
 		}
 
 		clients = append(clients, client)
