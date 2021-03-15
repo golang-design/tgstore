@@ -52,7 +52,6 @@ import (
 
 func main() {
 	tgs := tgstore.New()
-	tgs.MTProtoEndpoint = "tcp://91.108.56.151:443"
 	tgs.AppAPIID = 1234567890
 	tgs.AppAPIHash = "<your-telegram-app-api-hash>"
 	tgs.BotTokens = []string{"<your-telegram-bot-token>"}

@@ -58,7 +58,7 @@ type TGStore struct {
 	// Supported formats:
 	//   * tcp://<host>:<port>
 	//
-	// Default value: ""
+	// Default value: "tcp://149.154.175.58:443"
 	MTProtoEndpoint string `mapstructure:"mtproto_endpoint"`
 
 	// MTProtoPublicKeys is the MTProto public keys.
@@ -121,6 +121,7 @@ type TGStore struct {
 // and keeps everything working.
 func New() *TGStore {
 	return &TGStore{
+		MTProtoEndpoint:             "tcp://149.154.175.58:443",
 		MaxObjectMetadataCacheBytes: 64 << 20,
 		channelAccessHashes:         map[*telegram.Client]*sync.Map{},
 	}
