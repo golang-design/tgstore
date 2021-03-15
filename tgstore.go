@@ -154,17 +154,8 @@ func (tgs *TGStore) load() {
 		return
 	}
 
-	userCacheDir, err := os.UserCacheDir()
-	if err != nil {
-		tgs.loadError = fmt.Errorf(
-			"failed to get user cache dir: %v",
-			err,
-		)
-		return
-	}
-
 	appDir := filepath.Join(
-		userCacheDir,
+		os.TempDir(),
 		"tgstore",
 		strconv.FormatInt(tgs.AppAPIID, 10),
 	)
