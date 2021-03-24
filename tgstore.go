@@ -82,14 +82,14 @@ type TGStore struct {
 	// Default value: ""
 	AppAPIHash string `mapstructure:"app_api_hash"`
 
-	// BotTokens is the Telegram bot tokens.
+	// BotToken is the Telegram bot token.
 	//
-	// The Telegram bots targeted by the `BotTokens` must have at least
+	// The Telegram bot targeted by the `BotToken` must have at least
 	// "Post Messages" permission in the channel targeted by the `ChannelID`
 	// to upload objects.
 	//
 	// Default value: nil
-	BotTokens []string `mapstructure:"bot_tokens"`
+	BotToken string `mapstructure:"bot_token"`
 
 	// ChannelID is the ID of the Telegram channel used to store the objects
 	// to be uploaded.
@@ -111,7 +111,7 @@ type TGStore struct {
 	loadOnce            sync.Once
 	loadError           error
 	client              func() *telegram.Client
-	channelAccessHashes map[*telegram.Client]*sync.Map
+	channelAccessHash   sync.Map
 	objectMetadataCache *bigcache.BigCache
 }
 
@@ -123,7 +123,6 @@ func New() *TGStore {
 	return &TGStore{
 		MTProtoEndpoint:             "tcp://149.154.175.58:443",
 		MaxObjectMetadataCacheBytes: 64 << 20,
-		channelAccessHashes:         map[*telegram.Client]*sync.Map{},
 	}
 }
 
@@ -254,61 +253,37 @@ AQIDAQAB
 		}
 	}
 
-	if len(tgs.BotTokens) == 0 {
-		tgs.loadError = errors.New("at least one bot token is required")
+	clientConfig.SessionFile = filepath.Join(
+		appDir,
+		fmt.Sprintf(
+			"%x-session.json",
+			sha256.Sum256([]byte(tgs.BotToken)),
+		),
+	)
+
+	client, err := telegram.NewClient(clientConfig)
+	if err != nil {
+		tgs.loadError = fmt.Errorf(
+			"failed to create telegram client: %v",
+			err,
+		)
 		return
 	}
 
-	clients := make([]*telegram.Client, 0, len(tgs.BotTokens))
-	for _, botToken := range tgs.BotTokens {
-		clientConfig.SessionFile = filepath.Join(
-			appDir,
-			fmt.Sprintf(
-				"%x-session.json",
-				sha256.Sum256([]byte(botToken)),
-			),
+	if _, err := client.AuthImportBotAuthorization(
+		1,
+		int32(tgs.AppAPIID),
+		tgs.AppAPIHash,
+		tgs.BotToken,
+	); err != nil {
+		tgs.loadError = fmt.Errorf(
+			"failed to auth telegram bot: %v",
+			err,
 		)
-
-		client, err := telegram.NewClient(clientConfig)
-		if err != nil {
-			tgs.loadError = fmt.Errorf(
-				"failed to create telegram client: %v",
-				err,
-			)
-			return
-		}
-
-		if _, err := client.AuthImportBotAuthorization(
-			1,
-			int32(tgs.AppAPIID),
-			tgs.AppAPIHash,
-			botToken,
-		); err != nil {
-			tgs.loadError = fmt.Errorf(
-				"failed to auth telegram bot: %v",
-				err,
-			)
-			return
-		}
-
-		clients = append(clients, client)
-
-		tgs.channelAccessHashes[client] = &sync.Map{}
+		return
 	}
 
-	clientMutex := sync.Mutex{}
-	clientCursor := 0
 	tgs.client = func() *telegram.Client {
-		clientMutex.Lock()
-		defer clientMutex.Unlock()
-
-		client := clients[clientCursor]
-		if clientCursor < len(clients)-1 {
-			clientCursor++
-		} else {
-			clientCursor = 0
-		}
-
 		return client
 	}
 
@@ -661,7 +636,7 @@ func (tgs *TGStore) tgChannelAccessHash(
 	client *telegram.Client,
 	id int32,
 ) (int64, error) {
-	if ahi, ok := tgs.channelAccessHashes[client].Load(id); ok {
+	if ahi, ok := tgs.channelAccessHash.Load(id); ok {
 		return ahi.(int64), nil
 	}
 
@@ -697,7 +672,7 @@ func (tgs *TGStore) tgChannelAccessHash(
 		return 0, fs.ErrNotExist
 	}
 
-	tgs.channelAccessHashes[client].Store(id, c.AccessHash)
+	tgs.channelAccessHash.Store(id, c.AccessHash)
 
 	return c.AccessHash, nil
 }

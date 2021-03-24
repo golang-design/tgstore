@@ -54,7 +54,7 @@ func main() {
 	tgs := tgstore.New()
 	tgs.AppAPIID = 1234567890
 	tgs.AppAPIHash = "<your-telegram-app-api-hash>"
-	tgs.BotTokens = []string{"<your-telegram-bot-token>"}
+	tgs.BotToken = "<your-telegram-bot-token>"
 	tgs.ChannelID = 1234567890
 
 	objectSecretKey := make([]byte, chacha20poly1305.KeySize)
